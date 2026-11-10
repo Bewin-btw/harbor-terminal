@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { claudeActivity, codexEvent, codexScreenActivity, ActivityMonitor } = require('../src/activity.cjs');
+const { claudeUpdatePending, claudeActivity, codexEvent, codexScreenActivity, ActivityMonitor } = require('../src/activity.cjs');
 const session = { id: '11111111-1111-4111-8111-111111111111', resumeId: '22222222-2222-4222-8222-222222222222', pid: 42, kind: 'claude', state: 'running', lastStartedAt: '2026-11-03T10:00:00Z' };
 const registry = { pid: 42, sessionId: session.resumeId, startedAt: Date.parse(session.lastStartedAt) + 200, status: 'busy' };
 
@@ -76,4 +76,11 @@ test('Codex journal handles partial writes, completed turns, restarts, and missi
   assert.equal((await monitor.scan([restarted]))[session.id].state, 'completed');
   await fs.appendFile(file, event('task_started', '07') + '\n' + JSON.stringify({ type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(3 * 1024 * 1024) } }) + '\n');
   assert.equal((await monitor.scan([restarted]))[session.id].state, 'unknown', 'a skipped span must invalidate the earlier completion');
+});
+
+test('a Claude Code update waiting for restart is read from the footer only', () => {
+  const footer = ['Готово.', '                   ✔ Update installed · /restart to apply', '────', '❯', '────', '⏵⏵ auto mode on', '', ''].join('\n');
+  assert.equal(claudeUpdatePending(footer), true);
+  assert.equal(claudeUpdatePending('✔ Update installed · Restart to update\n' + 'строка\n'.repeat(20)), false);
+  assert.equal(claudeUpdatePending('❯ обычный экран\n⏵⏵ auto mode on'), false);
 });

@@ -40,6 +40,11 @@ function codexScreenActivity(text) {
   return null;
 }
 
+// Claude Code installs updates in the background and asks for a restart in its footer.
+function claudeUpdatePending(text) {
+  return /update installed\s*·\s*\/?restart/i.test(text.split('\n').filter(line => line.trim()).slice(-8).join('\n'));
+}
+
 class ActivityMonitor {
   constructor({ home, directory }) { this.home = home; this.directory = directory; this.paths = new Map(); this.journals = new Map(); this.screens = new Map(); }
   async locate(session) {
@@ -126,7 +131,8 @@ class ActivityMonitor {
       await new Promise(resolve => terminal.write(screen.data, resolve));
       const b = terminal.buffer.active, lines = [];
       for (let y = b.baseY; y < b.baseY + terminal.rows; y++) lines.push(b.getLine(y)?.translateToString(true) || '');
-      activity = codexScreenActivity(lines.join('\n'));
+      const text = lines.join('\n');
+      activity = session.kind === 'claude' ? (claudeUpdatePending(text) ? { update: true } : null) : codexScreenActivity(text);
     } finally { terminal.dispose(); }
     this.screens.set(session.id, { mtime: stat.mtimeMs, started: session.lastStartedAt, activity }); return activity;
   }
@@ -143,10 +149,11 @@ class ActivityMonitor {
           const registry = await fs.readFile(path.join(this.home, '.claude/sessions', `${Number(s.pid)}.json`), 'utf8').then(JSON.parse).catch(() => null);
           const native = claudeActivity(s, registry, journal?.state === 'completed');
           statuses[s.id] = native || result('unknown', 'unavailable');
+          if ((await this.screen(s).catch(() => null))?.update) statuses[s.id] = { ...statuses[s.id], update: true };
         } else statuses[s.id] = await this.screen(s).catch(() => null) || journal || result('unknown', 'unavailable');
       } catch { statuses[s.id] = result('unknown', 'unavailable'); }
     }
     return statuses;
   }
 }
-module.exports = { claudeActivity, codexEvent, codexScreenActivity, ActivityMonitor };
+module.exports = { claudeUpdatePending, claudeActivity, codexEvent, codexScreenActivity, ActivityMonitor };

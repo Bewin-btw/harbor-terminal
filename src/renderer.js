@@ -113,6 +113,7 @@ function renderList() {
   const list = $('session-list'); const focusedId = list.contains(document.activeElement) ? document.activeElement.closest('[data-id]')?.dataset.id : null; list.replaceChildren();
   const rows = sidebarRows(), visible = rows.filter(row => row.id);
   $('group-toggle').setAttribute('aria-pressed', String(grouped)); $('group-toggle').hidden = archived;
+  $('clean-archive').hidden = !archived || !sessions.some(s => s.archived && !live(s));
   const interrupted = resumable().length; $('resume-all').hidden = !interrupted || archived; $('resume-count').textContent = interrupted || '';
   $('session-count').textContent = String(matchingSessions().length);
   $('archive-count').textContent = sessions.filter(s => s.archived).length || '';
@@ -135,7 +136,9 @@ function renderList() {
     const copy = element('span', 'session-copy'); copy.append(element('span', 'session-name', s.title));
     const meta = element('span', 'session-meta'); meta.append(element('span', `status-dot ${status.key}`), element('span', 'status-label', status.label), element('span', '', '·'), element('span', 'folder', baseName(s.cwd)));
     if (gitInfo[s.id]?.branch) meta.append(element('span', 'branch', '⎇ ' + gitInfo[s.id].branch));
-    copy.append(meta); row.append(copy); if (s.pinned) row.append(element('span', 'pinned-marker', '⌑'));
+    copy.append(meta); row.append(copy);
+    if (s.state === 'running' && activities[s.id]?.update) { const mark = element('span', 'update-marker', '↻'); mark.title = 'Claude Code обновился. Правый клик → «Перезапустить с тем же диалогом»'; row.append(mark); }
+    if (s.pinned) row.append(element('span', 'pinned-marker', '⌑'));
     row.onclick = () => selectSession(s.id).catch(() => {}); row.oncontextmenu = e => { e.preventDefault(); api.context(s); }; list.append(row);
   }
   if (focusedId) list.querySelector(`[data-id="${focusedId}"]`)?.focus();
@@ -318,12 +321,25 @@ async function action(name, id = selected) {
     }
     case 'command': if (s) { commandId = s.id; $('command-input').value = s.command || ''; $('command-autostart').checked = Boolean(s.autostart); $('command-dialog').showModal(); $('command-input').focus(); } return;
     case 'resume-all': return resumeAll();
+    case 'restart': if (s && live(s)) {
+      const confirmed = await api.confirm({ title: `Перезапустить «${s.title}»?`, detail: 'Claude Code закроется и сразу откроется снова с этим же диалогом, уже в новой версии. Если он сейчас что-то делает, дождись конца ответа: незавершённый шаг не продолжится.', action: 'Перезапустить' });
+      if (!confirmed) return;
+      await run('stop', { id }); await run('start', { id }); if (id === selected) await selectSession(id);
+    } return;
+    case 'delete': if (s) return deleteSessions([s]); return;
+    case 'clean-archive': return deleteSessions(sessions.filter(item => item.archived && !live(item)));
     case 'search-all': return openSearchAll();
   }
 }
 
 // ---- Shell next to an agent, in the same folder
 async function createShell(base) {
+  // A shell idle at its prompt in the same folder is reused instead of piling up copies.
+  try {
+    const id = await api.request('idle-shell', { cwd: base.cwd, exclude: [base.id, selected, side?.id].filter(Boolean) });
+    const found = id && sessions.find(item => item.id === id);
+    if (found) return { ...found, reused: true };
+  } catch {}
   const s = await run('create', { kind: 'shell', cwd: base.cwd, title: `Терминал · ${baseName(base.cwd)}` });
   if (!sessions.some(item => item.id === s.id)) sessions.push(s);
   return s;
@@ -331,6 +347,7 @@ async function createShell(base) {
 async function shellHere(base) {
   if (!base) return openNew();
   const s = await createShell(base); archived = false; $('session-search').value = ''; await selectSession(s.id);
+  if (s.reused) toast('Открыл свободный терминал в этой папке');
 }
 
 // ---- Startup command
@@ -343,6 +360,26 @@ $('command-form').onsubmit = async event => {
     $('command-dialog').close(); toast(command ? 'Команда сохранена. Сработает при следующем открытии сессии.' : 'Команда при запуске убрана.');
   } catch {}
 };
+
+// ---- Delete archived cards. Only Harbor's card and saved screen go; the CLI dialog stays.
+async function deleteSessions(list) {
+  list = list.filter(s => s.archived && !live(s));
+  if (!list.length) return toast('В архиве нечего удалять');
+  const agents = list.filter(s => ['claude', 'codex'].includes(s.kind)).length;
+  const confirmed = await api.confirm({
+    title: list.length === 1 ? `Удалить «${list[0].title}»?` : `Удалить из архива все сессии (${list.length})?`,
+    detail: `Пропадут карточки и сохранённый вывод терминала, вернуть их нельзя.${agents ? ' Сами диалоги Claude/Codex останутся в их истории, их можно снова открыть через «Импорт диалогов».' : ''}`,
+    action: 'Удалить',
+  });
+  if (!confirmed) return;
+  let failed = 0;
+  for (const s of list) { try { await api.request('delete', { id: s.id }); } catch (error) { failed++; if (failed === 1) toast(error.message, true); } }
+  if (!failed) toast(list.length === 1 ? 'Удалено' : `Удалено: ${list.length}`);
+  if (list.some(s => s.id === selected)) {
+    const next = sessions.find(s => Boolean(s.archived) === archived && !list.some(item => item.id === s.id)) || sessions.find(s => !s.archived && !list.some(item => item.id === s.id));
+    if (next) await selectSession(next.id);
+  }
+}
 
 // ---- Resume everything that a reboot interrupted
 function resumable() { return sessions.filter(s => !s.archived && s.state === 'interrupted' && !(s.kind === 'codex' && !s.resumeId)); }
@@ -476,6 +513,7 @@ $('scrollback-select').onchange = async () => {
 };
 $('group-toggle').onclick = () => { grouped = !grouped; localStorage.setItem('groupByProject', grouped ? '1' : '0'); renderList(); };
 $('resume-all').onclick = () => resumeAll().catch(() => {});
+$('clean-archive').onclick = () => deleteSessions(sessions.filter(s => s.archived && !live(s))).catch(() => {});
 
 api.onEvent(message => {
   switch (message.event) {

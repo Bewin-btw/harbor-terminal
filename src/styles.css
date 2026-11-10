@@ -256,3 +256,5 @@ label.check input{width:auto;margin:0}
 /* Folder wins over branch when the card is narrow. */
 .session-meta .folder{flex:0 1 auto;min-width:28px}
 .session-meta .branch{flex:0 3 auto;min-width:24px}
+
+.update-marker{flex:none;font-size:11px;color:var(--accent);margin-left:4px}

@@ -97,6 +97,11 @@ async function screen(id) { return (await manager.request('attach', { id })).dat
     await until(async () => (await page.evaluate(() => document.querySelector('.session-row.active')?.dataset.id)) === right.id, 'search did not select the session');
     assert.equal(await page.locator('#side-pane').isHidden(), true, 'opening the right session on the left closes the split');
 
+    // ⌘T again: the shell idle in this folder is reused instead of a fourth copy.
+    await menu('shell-here');
+    await until(async () => (await page.evaluate(() => document.querySelector('.session-row.active')?.dataset.id)) === here.id, 'shell-here did not reuse the idle shell');
+    assert.equal((await sessions()).length, 3);
+
     // Startup command dialog from the context menu action.
     await menu('command', here.id);
     await page.locator('#command-input').fill('echo hi');
@@ -129,8 +134,17 @@ async function screen(id) { return (await manager.request('attach', { id })).dat
     await until(async () => (await sessions()).every(s => s.state === 'running'), 'resume-all did not start everything');
     assert.equal(await page.locator('#resume-all').isHidden(), true);
 
+    // Archive cleanup: a stopped, archived card disappears together with its screen.
+    await manager.request('stop', { id: dev.id });
+    await manager.request('update', { id: dev.id, patch: { archived: true } });
+    await page.locator('#archive-toggle').click();
+    await page.locator('#clean-archive').click();
+    await until(async () => (await sessions()).length === 2, 'clean archive did not delete the card');
+    assert.equal(fs.existsSync(path.join(environment.HARBOR_DATA_DIR, 'screens', `${dev.id}.json`)), false);
+    assert.equal(await page.locator('#clean-archive').isHidden(), true);
+
     assert.deepEqual(errors, []);
-    console.log('PASS: startup command, git branch, shell-here, split typing isolation, project groups, search-all, command dialog, scrollback, manager restart + autostart + resume-all.');
+    console.log('PASS: startup command, git branch, shell-here, split typing isolation, project groups, search-all, command dialog, scrollback, manager restart + autostart + resume-all, ⌘T reuse, archive cleanup.');
   } catch (error) {
     console.error(error); process.exitCode = 1;
     try { await (await application.firstWindow()).screenshot({ path: path.join(artifacts, 'features-failure.png') }); } catch {}

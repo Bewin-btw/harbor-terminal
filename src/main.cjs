@@ -25,7 +25,7 @@ async function refreshActivity() {
   } finally { activityBusy = false; }
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const methods = new Set(['list', 'create', 'start', 'attach', 'detach', 'input', 'resize', 'pause', 'resume', 'stop', 'update', 'checkpoint', 'scan', 'activity', 'conversation', 'settings', 'viewing', 'search-all', 'side-attach', 'side-detach']);
+const methods = new Set(['list', 'create', 'start', 'attach', 'detach', 'input', 'resize', 'pause', 'resume', 'stop', 'update', 'checkpoint', 'scan', 'activity', 'conversation', 'settings', 'viewing', 'search-all', 'side-attach', 'side-detach', 'delete', 'idle-shell']);
 
 // Agent finished or needs you while you look elsewhere: macOS notification + Dock badge.
 const unseen = new Set();
@@ -105,6 +105,22 @@ async function searchAll(query) {
   return results;
 }
 
+// ⌘T reuses a shell already sitting at a prompt in the same folder instead of piling up new ones.
+function childCount(pid) {
+  return new Promise(resolve => execFile('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000 }, (error, stdout) => {
+    if (error) return resolve(error.code === 1 ? 0 : -1);
+    resolve(stdout.trim().split('\n').filter(Boolean).length);
+  }));
+}
+async function idleShell(cwd, exclude) {
+  if (typeof cwd !== 'string') return null;
+  for (const s of activitySessions) {
+    if (s.kind !== 'shell' || s.archived || s.cwd !== cwd || s.command || s.state !== 'running' || !Number.isInteger(s.pid) || exclude.includes(s.id)) continue;
+    if (await childCount(s.pid) === 0) return s.id;
+  }
+  return null;
+}
+
 // A second connection to the manager drives the right-hand split pane.
 async function connectSide() {
   if (sideClient?.socket && !sideClient.socket.destroyed) return sideClient;
@@ -168,6 +184,7 @@ function registerIPC() {
     if (method === 'activity') return activities;
     if (method === 'viewing') { viewedId = typeof params?.id === 'string' ? params.id : null; markViewed(); return true; }
     if (method === 'search-all') return searchAll(params?.query);
+    if (method === 'idle-shell') return idleShell(params?.cwd, Array.isArray(params?.exclude) ? params.exclude : []);
     if (method === 'side-attach') return (await connectSide()).request('attach', { id: params?.id });
     if (method === 'side-detach') { if (sideClient) await sideClient.request('detach').catch(() => {}); return true; }
     if (method === 'conversation') {
@@ -223,7 +240,9 @@ function registerIPC() {
       { label: 'Скопировать рабочую папку', click: () => clipboard.writeText(session.cwd) },
       { type: 'separator' },
       { label: 'Сохранить вывод и завершить процесс…', enabled: live, click: () => action('stop') },
+      ...(session.kind === 'claude' && live ? [{ label: 'Перезапустить с тем же диалогом…', click: () => action('restart') }] : []),
       { label: session.archived ? 'Вернуть из архива' : 'В архив', enabled: !live, click: () => action('archive') },
+      ...(session.archived ? [{ label: 'Удалить навсегда…', enabled: !live, click: () => action('delete') }] : []),
     ]).popup({ window });
   });
 }

@@ -94,14 +94,14 @@ saved local Claude/Codex conversations.
 | `⌘O` | Import a saved conversation |
 | `⌘F` | Search terminal output |
 | `⇧⌘F` | Search the output of every session |
-| `⌘T` | Shell in the current session's folder |
+| `⌘T` | Shell in the current session's folder (reuses one that sits idle there) |
 | `⌘D` | Split view: shell on the right (again to close) |
 | `⌘1` … `⌘9` | Select a session |
 | `⌘⌥↑` / `⌘⌥↓` | Previous / next session |
 | `⌘+` / `⌘-` / `⌘0` | Font size |
 | `⌘C` / `⌘V` | Copy / paste; `Ctrl+C` is sent to the program |
 
-Right-click a session to rename, pin, stop or archive it. Drag its handle to
+Right-click a session to rename, pin, stop or archive it. Archived cards can be deleted one by one or all at once with "очистить"; the Claude/Codex dialogs themselves stay in their history. When Claude Code installs an update, its card shows ↻ and the context menu offers a restart into the same dialog. Drag its handle to
 reorder it; `⌥↑` / `⌥↓` also move a focused sidebar item. **Оформление**
 (Appearance) selects a theme. **Пауза** (Pause) suspends local processes without
 freeing their memory.
