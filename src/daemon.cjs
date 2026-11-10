@@ -8,14 +8,14 @@ const execute = promisify(require('node:child_process').execFile);
 const pty = require('node-pty');
 const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
-const { SessionStore, launchSpec, scanConversations, quoteShell, socketPath } = require('./core.cjs');
+const { SessionStore, launchSpec, scanConversations, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings } = require('./core.cjs');
 const { createCodexThread } = require('./codex.cjs');
 const { suspendTree } = require('./process-control.cjs');
 process.umask(0o077);
 const directory = process.argv[2];
 if (!directory || !path.isAbsolute(directory)) throw new Error('Absolute data directory required');
 const address = socketPath(directory), runtimes = new Map(), clients = new Set();
-let store, server, checkpointTimer, cwdTimer, stopping = false, saving = false;
+let store, server, checkpointTimer, cwdTimer, stopping = false, saving = false, settings = readSettings(directory);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function send(socket, message) {
   if (socket.destroyed) return;
@@ -83,7 +83,7 @@ async function launch(id) {
   }
   const spec = launchSpec(session);
   const previous = store.screen(id), cols = previous.cols || 100, rows = previous.rows || 30;
-  const terminal = new Terminal({ cols, rows, scrollback: 4000, allowProposedApi: true });
+  const terminal = new Terminal({ cols, rows, scrollback: settings.scrollback, allowProposedApi: true });
   const serialize = new SerializeAddon(); terminal.loadAddon(serialize);
   const shell = process.env.SHELL || '/bin/zsh';
   const args = session.kind === 'shell' ? (process.env.HARBOR_TEST ? ['-f'] : ['-l']) : ['-lic', `exec ${[spec.file, ...spec.args].map(quoteShell).join(' ')}`];
@@ -103,7 +103,10 @@ async function launch(id) {
     } catch {}
     return true;
   });
+  // Startup command: typed once the shell has printed something, like a person would.
+  let pendingCommand = session.kind === 'shell' && session.command ? session.command : null;
   child.onData(data => {
+    if (pendingCommand) { const command = pendingCommand; pendingCommand = null; setTimeout(() => { if (!r.exited) child.write(command + '\r'); }, 150); }
     r.pendingBytes += data.length;
     if (r.pendingBytes > 2 * 1024 * 1024) child.pause();
     r.tail = (r.tail + data).slice(-8192);
@@ -151,7 +154,14 @@ async function stopSession(id) {
 }
 async function handle(socket, method, params) {
   switch (method) {
-    case 'ping': return { version: 1, pid: process.pid };
+    case 'ping': return { version: 2, pid: process.pid, features: ['startup-command', 'settings'] };
+    case 'settings': {
+      if (params.set) {
+        settings = writeSettings(directory, { ...settings, ...params.set });
+        for (const r of runtimes.values()) if (!r.exited) r.terminal.options.scrollback = settings.scrollback;
+      }
+      return settings;
+    }
     case 'list': return { sessions: store.list(), warning: store.persistenceError || store.warning };
     case 'create': {
       const existing = params.resumeId && store.list().find(s => s.kind === params.kind && s.resumeId === params.resumeId);
@@ -201,7 +211,7 @@ async function handle(socket, method, params) {
     case 'stop': return stopSession(params.id);
     case 'update': {
       const patch = {};
-      for (const key of ['title', 'pinned', 'archived', 'resumeId']) if (Object.hasOwn(params.patch || {}, key)) patch[key] = params.patch[key];
+      for (const key of ['title', 'pinned', 'archived', 'resumeId', 'command', 'autostart']) if (Object.hasOwn(params.patch || {}, key)) patch[key] = params.patch[key];
       if (patch.title !== undefined) { patch.title = String(patch.title).trim().slice(0, 160); if (!patch.title) throw new Error('Введите название'); }
       const live = runtimes.has(params.id) && !runtimes.get(params.id).exited;
       if (patch.archived && live) throw new Error('Сначала завершите процесс или оставьте сессию в фоне');
@@ -234,7 +244,7 @@ async function shutdown() {
   setTimeout(() => process.exit(0), 120);
 }
 async function main() {
-  if (fs.existsSync(address)) {
+  if (verifySocketOwner(address)) {
     const alive = await new Promise(resolve => {
       const probe = net.createConnection(address);
       probe.once('connect', () => { probe.destroy(); resolve(true); });
@@ -270,6 +280,11 @@ async function main() {
   checkpointTimer = setInterval(() => checkpoint().catch(error => console.error(error)), 2000);
   cwdTimer = setInterval(() => trackDirectories().catch(() => {}), 4000);
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+  // Opt-in only: shells marked "autostart" come back with their command after a reboot.
+  for (const session of store.list()) {
+    if (session.kind !== 'shell' || !session.autostart || !session.command || session.archived || session.state !== 'interrupted') continue;
+    launch(session.id).catch(error => { try { update(session.id, { state: 'interrupted', error: error.message }); } catch {} });
+  }
   console.log('Harbor session manager ready');
 }
 main().catch(error => { console.error(error); process.exit(1); });

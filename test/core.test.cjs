@@ -169,3 +169,38 @@ test('Claude history supplies a readable prompt when the transcript only has too
   const [session] = await scanConversations(dir);
   assert.equal(session.title, 'Помоги настроить приложение');
 });
+
+test('startup commands are single-line, shell-only and cleared by an empty value', t => {
+  const { startupCommand } = require('../src/core.cjs');
+  const dir = temporary(t);
+  const store = new SessionStore(dir);
+  assert.equal(startupCommand('  npm run dev  '), 'npm run dev');
+  assert.equal(startupCommand(''), undefined);
+  assert.throws(() => startupCommand('ls\nrm -rf ~'), /одной строкой/);
+  const shell = store.create({ kind: 'shell', cwd: dir, command: 'npm run dev', autostart: true });
+  assert.equal(shell.command, 'npm run dev');
+  assert.equal(shell.autostart, true);
+  assert.equal(store.update(shell.id, { command: '', autostart: false }).command, undefined);
+  const agent = store.create({ kind: 'claude', cwd: dir, command: 'ignored', autostart: true });
+  assert.equal(agent.command, undefined);
+  assert.equal(agent.autostart, false);
+  assert.throws(() => store.update(agent.id, { command: 'ls' }), /только для терминала/);
+});
+
+test('settings fall back to safe values and persist with private permissions', t => {
+  const { readSettings, writeSettings } = require('../src/core.cjs');
+  const dir = temporary(t);
+  assert.deepEqual(readSettings(dir), { scrollback: 4000 });
+  assert.deepEqual(writeSettings(dir, { scrollback: 10000 }), { scrollback: 10000 });
+  assert.deepEqual(readSettings(dir), { scrollback: 10000 });
+  assert.deepEqual(writeSettings(dir, { scrollback: 999999 }), { scrollback: 4000 });
+  assert.equal(fs.statSync(path.join(dir, 'settings.json')).mode & 0o777, 0o600);
+});
+
+test('a socket path that is not our own socket is refused', t => {
+  const { verifySocketOwner } = require('../src/core.cjs');
+  const dir = temporary(t);
+  assert.equal(verifySocketOwner(path.join(dir, 'missing.sock')), false);
+  const file = path.join(dir, 'plain.sock'); fs.writeFileSync(file, '');
+  assert.throws(() => verifySocketOwner(file), error => error.code === 'HARBOR_FOREIGN_SOCKET');
+});

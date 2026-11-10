@@ -1,10 +1,21 @@
 const net = require('node:net');
+const fs = require('node:fs');
 const { EventEmitter } = require('node:events');
+
+function ownSocket(address) {
+  let stat;
+  try { stat = fs.lstatSync(address); } catch { return; }
+  if (!stat.isSocket() || stat.uid !== process.getuid()) {
+    const error = new Error(`Сокет ${address} создан не тобой — подключение отменено. Удали его вручную.`);
+    error.code = 'HARBOR_FOREIGN_SOCKET'; throw error;
+  }
+}
 
 class Client extends EventEmitter {
   constructor(address) { super(); this.address = address; this.pending = new Map(); this.sequence = 0; }
   connect() {
     return new Promise((resolve, reject) => {
+      try { ownSocket(this.address); } catch (error) { return reject(error); }
       this.socket = net.createConnection(this.address);
       let buffer = '';
       this.socket.setEncoding('utf8');

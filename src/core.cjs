@@ -40,6 +40,42 @@ function launchSpec(session) {
   }
 }
 
+// A single line typed into the user's own shell after it starts.
+function startupCommand(value) {
+  if (value === undefined || value === null) return undefined;
+  const command = String(value).trim();
+  if (!command) return undefined;
+  if (command.length > 2000) throw new Error('Команда слишком длинная');
+  if (/[\u0000-\u0008\u000a-\u001f\u007f]/.test(command)) throw new Error('Команда должна быть одной строкой');
+  return command;
+}
+
+const scrollbackOptions = [4000, 10000, 20000];
+function normalizeSettings(value = {}) {
+  const scrollback = Number(value.scrollback);
+  return { scrollback: scrollbackOptions.includes(scrollback) ? scrollback : 4000 };
+}
+function readSettings(directory) {
+  try { return normalizeSettings(JSON.parse(fs.readFileSync(path.join(directory, 'settings.json'), 'utf8'))); }
+  catch { return normalizeSettings(); }
+}
+function writeSettings(directory, value) {
+  const settings = normalizeSettings(value);
+  atomicJSON(path.join(directory, 'settings.json'), settings);
+  return settings;
+}
+
+// /tmp is shared between macOS users: refuse a socket someone else created.
+function verifySocketOwner(address) {
+  let stat;
+  try { stat = fs.lstatSync(address); } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  if (!stat.isSocket() || stat.uid !== process.getuid()) {
+    const error = new Error(`Сокет менеджера ${address} принадлежит другому пользователю или не является сокетом. Удалите его вручную.`);
+    error.code = 'HARBOR_FOREIGN_SOCKET'; throw error;
+  }
+  return true;
+}
+
 function quoteShell(value) { return "'" + String(value).replaceAll("'", "'\\''") + "'"; }
 
 class SessionStore {
@@ -98,6 +134,8 @@ class SessionStore {
       port: kind === 'ssh' && input.port !== undefined && input.port !== '' && input.port !== null ? Number(input.port) : undefined,
       resumeId: input.resumeId || undefined,
       imported: Boolean(input.resumeId),
+      command: kind === 'shell' ? startupCommand(input.command) : undefined,
+      autostart: kind === 'shell' && Boolean(input.autostart) && Boolean(startupCommand(input.command)),
     };
     launchSpec(session);
     this.sessions.push(session);
@@ -105,8 +143,14 @@ class SessionStore {
     return structuredClone(session);
   }
   update(id, patch) {
-    const allowed = new Set(['title', 'cwd', 'state', 'pinned', 'archived', 'resumeId', 'pid', 'exitCode', 'lastStartedAt', 'updatedAt', 'error']);
+    const allowed = new Set(['title', 'cwd', 'state', 'pinned', 'archived', 'resumeId', 'pid', 'exitCode', 'lastStartedAt', 'updatedAt', 'error', 'command', 'autostart']);
     if (Object.keys(patch).some(k => !allowed.has(k))) throw new Error('Изменение этого поля запрещено');
+    if (Object.hasOwn(patch, 'command') || Object.hasOwn(patch, 'autostart')) {
+      const existing = this.sessions.find(s => s.id === id);
+      if (existing && existing.kind !== 'shell') throw new Error('Команда при запуске доступна только для терминала');
+      if (Object.hasOwn(patch, 'command')) patch.command = startupCommand(patch.command);
+      if (Object.hasOwn(patch, 'autostart')) patch.autostart = Boolean(patch.autostart);
+    }
     if (patch.state && !states.has(patch.state)) throw new Error('Некорректное состояние');
     if (patch.resumeId && !UUID.test(patch.resumeId)) throw new Error('Некорректный ID диалога');
     if (patch.cwd && (!path.isAbsolute(patch.cwd) || !fs.statSync(patch.cwd).isDirectory())) throw new Error('Папка не найдена');
@@ -250,4 +294,4 @@ function socketPath(directory) {
   return path.join('/tmp', `harbor-${process.getuid()}-${crypto.createHash('sha256').update(directory).digest('hex').slice(0, 16)}.sock`);
 }
 
-module.exports = { SessionStore, launchSpec, scanConversations, atomicJSON, quoteShell, socketPath, UUID };
+module.exports = { SessionStore, launchSpec, scanConversations, atomicJSON, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings, normalizeSettings, scrollbackOptions, startupCommand, UUID };

@@ -150,3 +150,27 @@ test('explicit stop closes an interactive shell and keeps its screen', async t =
   assert.equal((await client.request('list')).sessions[0].state, 'saved');
   assert.ok((await client.request('attach', { id: s.id })).data.includes('STOP_SAVED'));
 });
+
+test('a startup command runs on open, and autostart brings the shell back after a restart', async t => {
+  const f = await fixture(t); let client = await f.start(); t.after(() => client.close());
+  const marker = path.join(f.directory, 'started');
+  const s = await client.request('create', { kind: 'shell', cwd: f.directory, command: `echo run >> ${marker}; printf "\\nSTARTUP_%s\\n" OK` });
+  await untilOutput(client, s.id, 'STARTUP_OK');
+  await client.request('update', { id: s.id, patch: { autostart: true } });
+  client.close(); await f.stop(); client = await f.start();
+  for (let i = 0; i < 80 && fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).length < 2; i++) await delay(50);
+  assert.equal(fs.readFileSync(marker, 'utf8').trim().split('\n').length, 2);
+  assert.equal((await client.request('list')).sessions[0].state, 'running');
+});
+
+test('scrollback setting is persisted by the manager and applied to new sessions', async t => {
+  const f = await fixture(t); let client = await f.start(); t.after(() => client.close());
+  assert.deepEqual(await client.request('settings'), { scrollback: 4000 });
+  assert.deepEqual(await client.request('settings', { set: { scrollback: 20000 } }), { scrollback: 20000 });
+  client.close(); await f.stop(); client = await f.start();
+  assert.deepEqual(await client.request('settings'), { scrollback: 20000 });
+  const s = await client.request('create', { kind: 'shell', cwd: f.directory });
+  await client.request('input', { id: s.id, data: 'i=0; while [ $i -lt 6000 ]; do echo line$i; i=$((i+1)); done; printf "\\nDONE_%s\\n" LINES\r' });
+  const view = await untilOutput(client, s.id, 'DONE_LINES');
+  assert.ok(view.data.includes('line100\r\n'), 'lines beyond the old 4000 limit are kept');
+});
