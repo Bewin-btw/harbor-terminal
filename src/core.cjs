@@ -294,4 +294,15 @@ function socketPath(directory) {
   return path.join('/tmp', `harbor-${process.getuid()}-${crypto.createHash('sha256').update(directory).digest('hex').slice(0, 16)}.sock`);
 }
 
-module.exports = { SessionStore, launchSpec, scanConversations, atomicJSON, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings, normalizeSettings, scrollbackOptions, startupCommand, UUID };
+// Plain text of a serialized xterm screen. The serializer encodes runs of blanks as
+// cursor-forward (ESC[nC), so those become spaces before the rest of the escapes go.
+const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*\x1b\\|[@-Z\\-_])/g;
+function screenText(data) {
+  return String(data)
+    .replace(/\x1b\[(\d*)C/g, (_, n) => ' '.repeat(Math.min(Number(n) || 1, 1000)))
+    .replace(ANSI, '')
+    .split(/\r?\n/)
+    .map(line => line.replace(/[\u0000-\u001f\u007f]/g, ''));
+}
+
+module.exports = { screenText, SessionStore, launchSpec, scanConversations, atomicJSON, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings, normalizeSettings, scrollbackOptions, startupCommand, UUID };

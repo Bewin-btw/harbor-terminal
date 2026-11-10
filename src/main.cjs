@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { spawn, execFile } = require('node:child_process');
 const { Client } = require('./rpc.cjs');
-const { socketPath, scanConversations } = require('./core.cjs');
+const { socketPath, scanConversations, screenText } = require('./core.cjs');
 const { ActivityMonitor } = require('./activity.cjs');
 const { readConversation } = require('./conversation.cjs');
 
@@ -83,7 +83,6 @@ async function refreshGit() {
 }
 
 // Search the saved screens (scrollback included) of every session.
-const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*\x1b\\|[@-Z\\-_])/g;
 async function searchAll(query) {
   const needle = String(query || '').trim().toLowerCase();
   if (needle.length < 2 || needle.length > 200) return [];
@@ -94,10 +93,10 @@ async function searchAll(query) {
     let data;
     try { data = JSON.parse(await fs.promises.readFile(path.join(dataDirectory, 'screens', `${session.id}.json`), 'utf8')).data; } catch { continue; }
     if (typeof data !== 'string') continue;
-    const lines = data.replace(ANSI, '').split(/\r?\n/);
+    const lines = screenText(data);
     const hits = [];
     for (let i = lines.length - 1; i >= 0 && hits.length < 5; i--) {
-      const line = lines[i].replace(/[\u0000-\u001f\u007f]/g, '').trim();
+      const line = lines[i].replace(/ {2,}/g, ' ').trim();
       if (line.toLowerCase().includes(needle)) hits.push(line.slice(0, 240));
     }
     if (hits.length) results.push({ id: session.id, title: session.title, kind: session.kind, archived: Boolean(session.archived), lines: hits });

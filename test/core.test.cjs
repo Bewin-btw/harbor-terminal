@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { SessionStore, launchSpec, scanConversations } = require('../src/core.cjs');
+const { SessionStore, launchSpec, scanConversations, screenText } = require('../src/core.cjs');
 const { suspendTree } = require('../src/process-control.cjs');
 
 function temporary(t) {
@@ -203,4 +203,9 @@ test('a socket path that is not our own socket is refused', t => {
   assert.equal(verifySocketOwner(path.join(dir, 'missing.sock')), false);
   const file = path.join(dir, 'plain.sock'); fs.writeFileSync(file, '');
   assert.throws(() => verifySocketOwner(file), error => error.code === 'HARBOR_FOREIGN_SOCKET');
+});
+
+test('screen text keeps the spaces the serializer encodes as cursor moves', () => {
+  const data = '\x1b[1mтип\x1b[1Cлеса\x1b[0m\x1b[3Cсам по\x1b[Cсебе\r\n\x1b]0;title\x07\x1b[2C│ ok';
+  assert.deepEqual(screenText(data), ['тип леса   сам по себе', '  │ ok']);
 });
