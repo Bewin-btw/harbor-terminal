@@ -16,6 +16,13 @@ let terminal, fit, searchAddon, epoch = 0, acceptingInput = false, pendingOutput
 let toastTimer, resizeTimer, switching = false, disposeScrollbar;
 let activities = {}, draggedId = null;
 let nativeTerminal;
+let gitInfo = {}, side = null, scrollback = 4000;
+let grouped = localStorage.getItem('groupByProject') === '1';
+let collapsedGroups; try { collapsedGroups = new Set(JSON.parse(localStorage.getItem('collapsedGroups') || '[]')); } catch { collapsedGroups = new Set(); }
+const terminalOptions = () => ({ fontFamily: '"SF Mono", Menlo, Monaco, monospace', fontSize, lineHeight: 1.2, cursorBlink: true, cursorStyle: 'bar', scrollback, smoothScrollDuration: 100, macOptionIsMeta: true, allowProposedApi: true, theme: terminalTheme(activeTheme) });
+const appShortcut = event => !(event.metaKey && ['c', 'v', 'k', 'n', 'o', 'f', 't', 'd'].includes(event.key.toLowerCase()));
+const projectOf = s => gitInfo[s.id]?.root || s.cwd;
+const baseName = p => p.split('/').filter(Boolean).pop() || '/';
 let sessionOrder; try { sessionOrder = JSON.parse(localStorage.getItem('sessionOrder') || '[]'); } catch { sessionOrder = []; }
 if (!Array.isArray(sessionOrder)) sessionOrder = [];
 let activeTheme = themes.find(t => t.id === localStorage.getItem('theme')) || themes[0];
@@ -31,6 +38,7 @@ function applyTheme(theme) {
   for (const [key, value] of Object.entries(theme.colors)) document.documentElement.style.setProperty('--' + key, value);
   localStorage.setItem('theme', theme.id); $('theme-name').textContent = theme.name;
   if (terminal) terminal.options.theme = terminalTheme(theme);
+  if (side) side.terminal.options.theme = terminalTheme(theme);
   for (const option of document.querySelectorAll('[data-theme-option]')) option.setAttribute('aria-pressed', String(option.dataset.themeOption === theme.id));
 }
 function openThemes() {
@@ -62,23 +70,57 @@ let fontSize = Math.min(24, Math.max(10, Number(localStorage.getItem('fontSize')
 const current = () => sessions.find(s => s.id === selected);
 const live = s => s && ['running', 'paused'].includes(s.state);
 const shortPath = p => info && p.startsWith(info.home) ? '~' + p.slice(info.home.length) : p;
-function toast(message, error = false) { clearTimeout(toastTimer); $('toast').textContent = message.replace(/^Error invoking remote method '[^']+': Error: /, ''); $('toast').className = error ? 'error' : ''; $('toast').hidden = false; toastTimer = setTimeout(() => { $('toast').hidden = true; }, error ? 11000 : 5000); }
+function toast(message, error = false) {
+  message = message.replace(/^Error invoking remote method '[^']+': Error: /, '');
+  if (/Изменение этого поля запрещено|Неизвестная операция/.test(message)) message += ' — менеджер сессий запущен из старой версии. Harbor → «Перезапустить менеджер сессий…».';
+  clearTimeout(toastTimer); $('toast').textContent = message; $('toast').className = error ? 'error' : ''; $('toast').hidden = false; toastTimer = setTimeout(() => { $('toast').hidden = true; }, error ? 11000 : 5000); }
 async function run(method, params = {}) { try { return await api.request(method, params); } catch (error) { toast(error.message, true); throw error; } }
 function element(tag, className, text) { const e = document.createElement(tag); if (className) e.className = className; if (text !== undefined) e.textContent = text; return e; }
-function visibleSessions() {
+function matchingSessions() {
   const query = $('session-search').value.trim().toLowerCase();
-  return orderedSessions().filter(s => Boolean(s.archived) === archived && `${s.title} ${s.cwd} ${names[s.kind]}`.toLowerCase().includes(query));
+  return orderedSessions().filter(s => Boolean(s.archived) === archived && `${s.title} ${s.cwd} ${names[s.kind]} ${gitInfo[s.id]?.branch || ''}`.toLowerCase().includes(query));
+}
+const searching = () => Boolean($('session-search').value.trim());
+const isCollapsed = key => collapsedGroups.has(key) && !searching();
+// Sidebar layout: rows are sessions, section labels or project headers, in display order.
+function sidebarRows() {
+  const list = matchingSessions(), rows = [];
+  if (archived) return list;
+  if (!grouped) {
+    let lastPinned = null;
+    for (const s of list) {
+      if (s.pinned !== lastPinned && (s.pinned || lastPinned === true)) rows.push({ label: s.pinned ? 'ЗАКРЕПЛЁННЫЕ' : 'ОСТАЛЬНЫЕ' });
+      lastPinned = s.pinned; rows.push(s);
+    }
+    return rows;
+  }
+  const pinned = list.filter(s => s.pinned), projects = new Map();
+  if (pinned.length) rows.push({ label: 'ЗАКРЕПЛЁННЫЕ' }, ...pinned);
+  for (const s of list) if (!s.pinned) { const key = projectOf(s); if (!projects.has(key)) projects.set(key, []); projects.get(key).push(s); }
+  for (const [key, items] of projects) { rows.push({ group: key, sessions: items }); if (!isCollapsed(key)) rows.push(...items); }
+  return rows;
+}
+function visibleSessions() { return sidebarRows().filter(row => row.id); }
+function groupHeader({ group, sessions: items }) {
+  const collapsed = isCollapsed(group);
+  const header = element('button', 'group-label'); header.setAttribute('aria-expanded', String(!collapsed)); header.title = shortPath(group);
+  header.append(element('span', 'chevron', collapsed ? '▸' : '▾'), element('span', 'group-name', baseName(group)), element('span', 'group-count', String(items.length)));
+  if (collapsed && items.some(s => s.state === 'running' && ['attention', 'completed'].includes(activities[s.id]?.state))) header.append(element('span', 'status-dot attention'));
+  header.onclick = () => { if (collapsedGroups.has(group)) collapsedGroups.delete(group); else collapsedGroups.add(group); localStorage.setItem('collapsedGroups', JSON.stringify([...collapsedGroups])); renderList(); };
+  return header;
 }
 function renderList() {
-  const list = $('session-list'); const focusedId = list.contains(document.activeElement) ? document.activeElement.closest('[data-id]')?.dataset.id : null; list.replaceChildren(); const visible = visibleSessions();
-  $('session-count').textContent = String(visible.length);
+  const list = $('session-list'); const focusedId = list.contains(document.activeElement) ? document.activeElement.closest('[data-id]')?.dataset.id : null; list.replaceChildren();
+  const rows = sidebarRows(), visible = rows.filter(row => row.id);
+  $('group-toggle').setAttribute('aria-pressed', String(grouped)); $('group-toggle').hidden = archived;
+  const interrupted = resumable().length; $('resume-all').hidden = !interrupted || archived; $('resume-count').textContent = interrupted || '';
+  $('session-count').textContent = String(matchingSessions().length);
   $('archive-count').textContent = sessions.filter(s => s.archived).length || '';
   $('list-label').textContent = archived ? 'АРХИВ' : 'СЕССИИ';
   $('archive-toggle').classList.toggle('selected', archived);
-  let lastPinned = null;
-  for (const s of visible) {
-    if (!archived && s.pinned !== lastPinned && (s.pinned || lastPinned === true)) list.append(element('div', 'section-label', s.pinned ? 'ЗАКРЕПЛЁННЫЕ' : 'ОСТАЛЬНЫЕ'));
-    lastPinned = s.pinned;
+  for (const s of rows) {
+    if (s.label) { list.append(element('div', 'section-label', s.label)); continue; }
+    if (s.group) { list.append(groupHeader(s)); continue; }
     const status = statusOf(s);
     const row = element('button', `session-row${selected === s.id ? ' active' : ''}`); row.dataset.id = s.id; row.setAttribute('aria-label', `${s.title}, ${status.label}`); row.setAttribute('aria-current', selected === s.id ? 'true' : 'false');
     row.title = `${s.title} · ${status.label}\n${status.detail}\nПеретащи для изменения порядка · Option+↑ / ↓`;
@@ -91,16 +133,17 @@ function renderList() {
     row.onkeydown = event => { if (!event.altKey || event.metaKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const direction = event.key === 'ArrowDown' ? 1 : -1; const target = visible[visible.findIndex(item => item.id === s.id) + direction]; if (target) moveSession(s.id, target.id, direction > 0).catch(() => {}); };
     row.append(element('span', `kind-icon ${s.kind}`, icons[s.kind]));
     const copy = element('span', 'session-copy'); copy.append(element('span', 'session-name', s.title));
-    const meta = element('span', 'session-meta'); meta.append(element('span', `status-dot ${status.key}`), element('span', 'status-label', status.label), element('span', '', '·'), element('span', 'folder', s.cwd.split('/').filter(Boolean).pop() || '/'));
+    const meta = element('span', 'session-meta'); meta.append(element('span', `status-dot ${status.key}`), element('span', 'status-label', status.label), element('span', '', '·'), element('span', 'folder', baseName(s.cwd)));
+    if (gitInfo[s.id]?.branch) meta.append(element('span', 'branch', '⎇ ' + gitInfo[s.id].branch));
     copy.append(meta); row.append(copy); if (s.pinned) row.append(element('span', 'pinned-marker', '⌑'));
     row.onclick = () => selectSession(s.id).catch(() => {}); row.oncontextmenu = e => { e.preventDefault(); api.context(s); }; list.append(row);
   }
   if (focusedId) list.querySelector(`[data-id="${focusedId}"]`)?.focus();
-  if (!visible.length) list.append(element('div', 'list-empty', $('session-search').value ? 'Сессии не найдены' : archived ? 'В архиве пока пусто' : 'Здесь появятся твои сессии.\nСоздай первую или добавь сохранённый диалог.'));
+  if (!rows.length) list.append(element('div', 'list-empty', $('session-search').value ? 'Сессии не найдены' : archived ? 'В архиве пока пусто' : 'Здесь появятся твои сессии.\nСоздай первую или добавь сохранённый диалог.'));
 }
 function renderHeader() {
   const s = current(); $('session-controls').hidden = !s;
-  $('current-title').textContent = s?.title || 'Рабочее пространство'; $('current-path').textContent = s ? shortPath(s.cwd) : 'Все терминалы в одном месте';
+  $('current-title').textContent = s?.title || 'Рабочее пространство'; $('current-path').textContent = s ? shortPath(s.cwd) + (gitInfo[s.id]?.branch ? `  ·  ⎇ ${gitInfo[s.id].branch}` : '') : 'Все терминалы в одном месте';
   $('current-icon').textContent = s ? icons[s.kind] : '⌘'; $('current-icon').className = `kind-icon ${s?.kind || ''}`;
   if (!s) { $('session-banner').hidden = true; return; }
   const status = statusOf(s); $('current-state').textContent = status.label; $('current-state').className = `state-tag ${status.key}`; $('current-state').title = status.detail;
@@ -126,7 +169,7 @@ function fitTerminal() {
 }
 function makeTerminal(cols, rows) {
   disposeScrollbar?.(); nativeTerminal?.dispose(); nativeTerminal = null; terminal?.dispose(); $('terminal').replaceChildren();
-  terminal = new Terminal({ cols, rows, fontFamily: '"SF Mono", Menlo, Monaco, monospace', fontSize, lineHeight: 1.2, cursorBlink: true, cursorStyle: 'bar', scrollback: 4000, smoothScrollDuration: 100, macOptionIsMeta: true, allowProposedApi: true, theme: terminalTheme(activeTheme) });
+  terminal = new Terminal({ cols, rows, ...terminalOptions() });
   fit = new FitAddon(); searchAddon = new SearchAddon(); terminal.loadAddon(fit); terminal.loadAddon(searchAddon);
   terminal.loadAddon(new WebLinksAddon((event, uri) => { if (event.metaKey || event.ctrlKey) api.openExternal(uri); }));
   terminal.open($('terminal'));
@@ -136,15 +179,14 @@ function makeTerminal(cols, rows) {
   refreshScrollbar = disposeScrollbar.update;
   terminal.onData(data => { if (acceptingInput && current()?.state === 'running') api.request('input', { id: selected, data }).catch(error => toast(error.message, true)); });
   terminal.onTitleChange(title => { $('current-title').title = title; });
-  terminal.attachCustomKeyEventHandler(event => {
-    if (event.metaKey && ['c', 'v', 'k', 'n', 'o', 'f'].includes(event.key.toLowerCase())) return false;
-    return true;
-  });
+  terminal.attachCustomKeyEventHandler(appShortcut);
 }
 async function selectSession(id) {
   const token = ++epoch;
   const cols = terminal?.cols || 100, rows = terminal?.rows || 30;
+  if (side?.id === id) closeSide();
   selected = id; acceptingInput = false; pendingOutput = []; switching = true;
+  api.request('viewing', { id }).catch(() => {});
   localStorage.setItem('selectedSession', id); renderList(); renderHeader();
   $('welcome').hidden = true; $('terminal-shell').hidden = false; $('find-bar').hidden = true;
   // Install and focus the target terminal synchronously. Keys typed while the
@@ -161,12 +203,12 @@ async function selectSession(id) {
   } catch { if (token === epoch) { switching = false; acceptingInput = false; } }
 }
 function openNew(kind = 'shell') {
-  selectedKind = kind; $('new-title').value = ''; $('new-cwd').value = current()?.cwd || info.home; $('new-host').value = ''; $('new-port').value = '';
+  selectedKind = kind; $('new-title').value = ''; $('new-cwd').value = current()?.cwd || info.home; $('new-host').value = ''; $('new-port').value = ''; $('new-command').value = '';
   updateKind(); $('new-dialog').showModal(); $('new-title').focus();
 }
 function updateKind() {
   document.querySelectorAll('[data-kind]').forEach(button => button.classList.toggle('selected', button.dataset.kind === selectedKind));
-  $('ssh-fields').hidden = selectedKind !== 'ssh'; $('new-host').required = selectedKind === 'ssh';
+  $('ssh-fields').hidden = selectedKind !== 'ssh'; $('shell-fields').hidden = selectedKind !== 'shell'; $('new-host').required = selectedKind === 'ssh';
   $('new-kind-note').textContent = { shell: 'Твоя обычная оболочка, команды и настройки.', claude: 'Новый диалог Claude Code. Сохраняем его ID для продолжения после перезапуска.', codex: 'Создадим новый диалог Codex и сохраним его ID для продолжения после перезапуска.', ssh: 'Для сохранения удалённой задачи после разрыва связи запускай её внутри tmux на сервере.' }[selectedKind];
   $('create-button').textContent = selectedKind === 'ssh' ? 'Подключиться ↗' : `Открыть ${names[selectedKind]} ↗`;
 }
@@ -174,7 +216,7 @@ async function createSession(event) {
   event.preventDefault(); const button = $('create-button'); button.disabled = true;
   try {
     const raw = $('new-cwd').value.trim(); const cwd = raw === '~' ? info.home : raw.startsWith('~/') ? info.home + raw.slice(1) : raw;
-    const s = await run('create', { kind: selectedKind, title: $('new-title').value.trim(), cwd, host: $('new-host').value.trim(), port: $('new-port').value ? Number($('new-port').value) : undefined });
+    const s = await run('create', { kind: selectedKind, title: $('new-title').value.trim(), cwd, host: $('new-host').value.trim(), port: $('new-port').value ? Number($('new-port').value) : undefined, ...(selectedKind === 'shell' && $('new-command').value.trim() ? { command: $('new-command').value.trim() } : {}) });
     if (!sessions.some(item => item.id === s.id)) sessions.push(s);
     archived = false; $('session-search').value = ''; $('new-dialog').close(); await selectSession(s.id);
   } finally { button.disabled = false; }
@@ -260,19 +302,190 @@ async function action(name, id = selected) {
       return;
     }
     case 'font-up': case 'font-down': case 'font-reset':
-      fontSize = name === 'font-reset' ? 13 : Math.min(24, Math.max(10, fontSize + (name === 'font-up' ? 1 : -1))); localStorage.setItem('fontSize', fontSize); if (terminal) { terminal.options.fontSize = fontSize; fitTerminal(); } return;
+      fontSize = name === 'font-reset' ? 13 : Math.min(24, Math.max(10, fontSize + (name === 'font-up' ? 1 : -1))); localStorage.setItem('fontSize', fontSize); if (terminal) { terminal.options.fontSize = fontSize; fitTerminal(); } if (side) { side.terminal.options.fontSize = fontSize; fitSide(); } return;
     case 'rename': if (s) { renamingId = s.id; $('rename-input').value = s.title; $('rename-dialog').showModal(); $('rename-input').select(); } return;
     case 'pin': if (s) await run('update', { id, patch: { pinned: !s.pinned } }); return;
     case 'archive': if (s) { await run('update', { id, patch: { archived: !s.archived } }); renderList(); renderHeader(); } return;
     case 'bind': return openImport(id);
     case 'stop': return stopCurrent(id);
+    case 'select': if (s) { archived = Boolean(s.archived); $('session-search').value = ''; collapsedGroups.delete(projectOf(s)); await selectSession(id); } return;
+    case 'shell-here': return shellHere(s || current());
+    case 'split': if (s) return openSide(s.id); return;
+    case 'split-toggle': {
+      if (side) return closeSide();
+      const base = current(); if (!base) return openNew();
+      const created = await createShell(base); return openSide(created.id);
+    }
+    case 'command': if (s) { commandId = s.id; $('command-input').value = s.command || ''; $('command-autostart').checked = Boolean(s.autostart); $('command-dialog').showModal(); $('command-input').focus(); } return;
+    case 'resume-all': return resumeAll();
+    case 'search-all': return openSearchAll();
   }
 }
+
+// ---- Shell next to an agent, in the same folder
+async function createShell(base) {
+  const s = await run('create', { kind: 'shell', cwd: base.cwd, title: `Терминал · ${baseName(base.cwd)}` });
+  if (!sessions.some(item => item.id === s.id)) sessions.push(s);
+  return s;
+}
+async function shellHere(base) {
+  if (!base) return openNew();
+  const s = await createShell(base); archived = false; $('session-search').value = ''; await selectSession(s.id);
+}
+
+// ---- Startup command
+let commandId = null;
+$('command-form').onsubmit = async event => {
+  event.preventDefault();
+  const command = $('command-input').value.trim();
+  try {
+    await run('update', { id: commandId, patch: { command, autostart: Boolean(command) && $('command-autostart').checked } });
+    $('command-dialog').close(); toast(command ? 'Команда сохранена. Сработает при следующем открытии сессии.' : 'Команда при запуске убрана.');
+  } catch {}
+};
+
+// ---- Resume everything that a reboot interrupted
+function resumable() { return sessions.filter(s => !s.archived && s.state === 'interrupted' && !(s.kind === 'codex' && !s.resumeId)); }
+async function resumeAll() {
+  const list = resumable();
+  if (!list.length) return toast('Прерванных сессий нет');
+  const agents = list.filter(s => ['claude', 'codex'].includes(s.kind)).length;
+  const noun = list.length % 10 === 1 && list.length % 100 !== 11 ? 'сессию' : [2, 3, 4].includes(list.length % 10) && ![12, 13, 14].includes(list.length % 100) ? 'сессии' : 'сессий';
+  const confirmed = await api.confirm({ title: `Возобновить ${list.length} ${noun}?`, detail: `${agents ? `Claude/Codex (${agents}) продолжат сохранённые диалоги — убедись, что они не открыты в другом терминале. ` : ''}Терминалы откроются заново в своих папках; повторится только заданная «команда при запуске». SSH подключится снова.`, action: 'Возобновить' });
+  if (!confirmed) return;
+  let failed = 0;
+  for (const s of list) { try { await api.request('start', { id: s.id }); } catch { failed++; } }
+  toast(failed ? `Возобновлено ${list.length - failed} из ${list.length}. Остальные открой по одной — там будет причина.` : `Возобновлено: ${list.length}`, Boolean(failed));
+  if (selected && list.some(s => s.id === selected)) await selectSession(selected);
+}
+
+// ---- Split pane: a second, independent view of another session
+function fitSide() {
+  if (!side?.ready || $('side-pane').hidden) return;
+  try { side.fit.fit(); api.request('resize', { id: side.id, cols: side.terminal.cols, rows: side.terminal.rows }).catch(() => {}); } catch {}
+}
+function closeSide(remember = true) {
+  if (!side) return;
+  const old = side; side = null; old.terminal.dispose(); $('side-terminal').replaceChildren(); $('side-pane').hidden = true;
+  api.request('side-detach').catch(() => {});
+  if (remember) localStorage.removeItem('sideSession');
+  setTimeout(fitTerminal, 0); terminal?.focus();
+}
+async function openSide(id) {
+  const s = sessions.find(item => item.id === id); if (!s) return;
+  if (id === selected) return toast('Эта сессия уже открыта слева');
+  closeSide(false);
+  $('side-pane').hidden = false; $('side-icon').textContent = icons[s.kind]; $('side-icon').className = `kind-icon ${s.kind}`;
+  const term = new Terminal({ cols: 80, rows: 24, ...terminalOptions() });
+  const sideFit = new FitAddon(); term.loadAddon(sideFit);
+  term.loadAddon(new WebLinksAddon((event, uri) => { if (event.metaKey || event.ctrlKey) api.openExternal(uri); }));
+  term.open($('side-terminal'));
+  const state = side = { id, terminal: term, fit: sideFit, pending: [], ready: false };
+  localStorage.setItem('sideSession', id); renderSide();
+  term.onData(data => { if (state.ready && sessions.find(item => item.id === id)?.state === 'running') api.request('input', { id, data }).catch(error => toast(error.message, true)); });
+  term.attachCustomKeyEventHandler(appShortcut);
+  term.textarea?.addEventListener('focus', () => api.request('viewing', { id }).catch(() => {}));
+  term.textarea?.addEventListener('blur', () => api.request('viewing', { id: selected }).catch(() => {}));
+  setTimeout(fitTerminal, 0);
+  try {
+    const view = await run('side-attach', { id }); if (side !== state) return;
+    term.resize(view.cols || 100, view.rows || 30);
+    await new Promise(resolve => term.write(view.data || '', resolve)); if (side !== state) return;
+    for (const chunk of state.pending) term.write(chunk);
+    state.pending = []; state.ready = true;
+    renderSide(); fitSide(); term.focus();
+  } catch { if (side === state) closeSide(); }
+}
+function renderSide() {
+  if (!side) return;
+  const s = sessions.find(item => item.id === side.id);
+  if (!s) return closeSide();
+  $('side-title').textContent = s.state === 'running' ? s.title : `${s.title} · ${(states[s.state] || '').toLowerCase()}`;
+  side.terminal.options.disableStdin = s.state !== 'running';
+}
+$('side-close').onclick = () => closeSide();
+$('side-swap').onclick = () => { const id = side?.id; if (id) selectSession(id).catch(() => {}); };
+
+// ---- Drag files into a terminal: paste their escaped paths, like Terminal.app
+const escapePath = p => p.replace(/[^\p{L}\p{N}_\-.,:/@+=%~]/gu, '\\$&');
+const hasFiles = event => Boolean(event.dataTransfer?.types.includes('Files'));
+$('terminal-shell').addEventListener('dragover', event => {
+  if (!hasFiles(event)) return;
+  event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; $('drop-hint').hidden = false;
+});
+$('terminal-shell').addEventListener('dragleave', event => { if (!$('terminal-shell').contains(event.relatedTarget)) $('drop-hint').hidden = true; });
+$('terminal-shell').addEventListener('drop', event => {
+  $('drop-hint').hidden = true;
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  const toSide = event.target instanceof Element && Boolean(event.target.closest('#side-pane'));
+  const id = toSide ? side?.id : selected, s = sessions.find(item => item.id === id);
+  if (!s || s.state !== 'running') return toast('Сессия не запущена — путь некуда вставить', true);
+  const paths = [...event.dataTransfer.files].map(file => { try { return api.pathForFile(file); } catch { return ''; } }).filter(Boolean);
+  if (paths.length) api.request('input', { id, data: paths.map(escapePath).join(' ') + ' ' }).catch(error => toast(error.message, true));
+  (toSide ? side?.terminal : terminal)?.focus();
+});
+document.addEventListener('dragover', event => { if (hasFiles(event)) event.preventDefault(); });
+document.addEventListener('drop', event => { if (hasFiles(event)) event.preventDefault(); });
+
+// ---- Search across every session's saved output
+let searchTimer, searchToken = 0;
+function openSearchAll() {
+  $('search-all-dialog').showModal(); $('search-all-input').select(); $('search-all-input').focus();
+  if (!$('search-all-input').value) $('search-all-list').replaceChildren(element('div', 'list-empty', 'Введи хотя бы два символа'));
+}
+function highlighted(line, query) {
+  const span = element('span', 'search-line'), lower = line.toLowerCase(), needle = query.toLowerCase();
+  let position = 0, index;
+  while ((index = lower.indexOf(needle, position)) >= 0) {
+    span.append(line.slice(position, index), element('mark', '', line.slice(index, index + needle.length))); position = index + needle.length;
+  }
+  span.append(line.slice(position)); return span;
+}
+async function runSearchAll() {
+  const query = $('search-all-input').value.trim(), token = ++searchToken, list = $('search-all-list');
+  if (query.length < 2) return list.replaceChildren(element('div', 'list-empty', 'Введи хотя бы два символа'));
+  let results;
+  try { results = await run('search-all', { query }); } catch { return; }
+  if (token !== searchToken) return;
+  list.replaceChildren();
+  for (const result of results) {
+    const button = element('button', 'import-row search-result'); button.append(element('span', `kind-icon ${result.kind}`, icons[result.kind]));
+    const copy = element('span', 'import-copy'); copy.append(element('strong', '', result.title + (result.archived ? ' · архив' : '')));
+    for (const line of result.lines) copy.append(highlighted(line, query));
+    button.append(copy);
+    button.onclick = async () => {
+      $('search-all-dialog').close(); await action('select', result.id);
+      $('find-bar').hidden = false; $('find-input').value = query; searchAddon?.findPrevious(query); $('find-input').focus();
+    };
+    list.append(button);
+  }
+  if (!results.length) list.append(element('div', 'list-empty', 'Ничего не нашлось'));
+}
+$('search-all-input').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearchAll, 250); };
+$('search-all-button').onclick = openSearchAll;
+
+// ---- Settings shared with the session manager
+$('scrollback-select').onchange = async () => {
+  try {
+    const value = await run('settings', { set: { scrollback: Number($('scrollback-select').value) } });
+    scrollback = value.scrollback; $('scrollback-select').value = String(scrollback);
+    if (terminal) terminal.options.scrollback = scrollback;
+    if (side) side.terminal.options.scrollback = scrollback;
+  } catch { $('scrollback-select').value = String(scrollback); }
+};
+$('group-toggle').onclick = () => { grouped = !grouped; localStorage.setItem('groupByProject', grouped ? '1' : '0'); renderList(); };
+$('resume-all').onclick = () => resumeAll().catch(() => {});
+
 api.onEvent(message => {
   switch (message.event) {
     case 'activity': activities = message.statuses; if (!draggedId) renderList(); renderHeader(); break;
-    case 'sessions': sessions = message.sessions; if (!draggedId) renderList(); renderHeader(); break;
+    case 'sessions': sessions = message.sessions; if (!draggedId) renderList(); renderHeader(); renderSide(); break;
+    case 'git': gitInfo = message.git; if (!draggedId) renderList(); renderHeader(); break;
     case 'output': if (message.id === selected) { if (switching) pendingOutput.push(message.data); else terminal?.write(message.data); } break;
+    case 'side-output': if (side && message.id === side.id) { if (side.ready) side.terminal.write(message.data); else side.pending.push(message.data); } break;
+    case 'side-reset': if (side && message.id === side.id && side.ready) side.terminal.reset(); break;
+    case 'side-lost': if (side) { const id = side.id; closeSide(false); setTimeout(() => openSide(id).catch(() => {}), 1000); } break;
     case 'reset': if (message.id === selected && !switching) { terminal?.reset(); } break;
     case 'warning': toast(message.message, true); break;
     case 'connection':
@@ -303,7 +516,7 @@ $('find-input').oninput = () => searchAddon?.findNext($('find-input').value, { i
 $('find-input').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); searchAddon?.[event.shiftKey ? 'findPrevious' : 'findNext']($('find-input').value); } if (event.key === 'Escape') $('find-close').click(); };
 $('find-prev').onclick = () => searchAddon?.findPrevious($('find-input').value); $('find-next').onclick = () => searchAddon?.findNext($('find-input').value);
 $('find-close').onclick = () => { $('find-bar').hidden = true; searchAddon?.clearDecorations(); terminal?.focus(); };
-new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(fitTerminal, 80); }).observe($('terminal-shell'));
+new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { fitTerminal(); fitSide(); }, 80); }).observe($('terminal-shell'));
 document.addEventListener('keydown', event => {
   if (document.querySelector('dialog[open]')) return;
   if (event.metaKey && /^[1-9]$/.test(event.key)) { const s = visibleSessions()[Number(event.key) - 1]; if (s) { event.preventDefault(); selectSession(s.id).catch(() => {}); } }
@@ -315,6 +528,11 @@ document.addEventListener('keydown', event => {
     $('connection-dot').classList.add('online'); $('connection-label').textContent = 'Менеджер сессий подключён';
     if (data.warning) toast(data.warning, true);
     const last = localStorage.getItem('selectedSession'); const session = sessions.find(s => s.id === last && !s.archived) || sessions.find(s => !s.archived);
+    try { scrollback = (await api.request('settings')).scrollback || 4000; }
+    catch { setTimeout(() => toast('Менеджер сессий запущен из прошлой версии. Команды при запуске и размер истории заработают после Harbor → «Перезапустить менеджер сессий…» (работающие процессы завершатся).', true), 1500); }
+    $('scrollback-select').value = String(scrollback);
     if (session) await selectSession(session.id);
+    const sideId = localStorage.getItem('sideSession');
+    if (sideId && sideId !== selected && sessions.some(s => s.id === sideId && !s.archived)) openSide(sideId).catch(() => {});
   } catch (error) { $('connection-label').textContent = 'Не удалось подключиться'; toast(error.message, true); }
 })();

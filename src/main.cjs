@@ -1,8 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, Notification } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const { Client } = require('./rpc.cjs');
 const { socketPath, scanConversations } = require('./core.cjs');
 const { ActivityMonitor } = require('./activity.cjs');
@@ -11,7 +11,7 @@ const { readConversation } = require('./conversation.cjs');
 app.setName('Harbor');
 const dataDirectory = process.env.HARBOR_DATA_DIR || path.join(app.getPath('appData'), 'Harbor');
 app.setPath('userData', dataDirectory);
-let window, client, connecting, quitting = false;
+let window, client, connecting, quitting = false, sideClient, sideConnecting, viewedId = null;
 const activityMonitor = new ActivityMonitor({ home: process.env.HARBOR_TEST === '1' && process.env.HARBOR_HISTORY_HOME || os.homedir(), directory: dataDirectory });
 let activityTimer, activityBusy = false, activitySessions = [], activities = {}, activitySignature = '';
 async function refreshActivity() {
@@ -19,12 +19,108 @@ async function refreshActivity() {
   activityBusy = true;
   try {
     const statuses = await activityMonitor.scan(activitySessions);
+    notifyTransitions(activities, statuses);
     const signature = JSON.stringify(statuses); activities = statuses;
     if (signature !== activitySignature) { activitySignature = signature; forward('activity', { statuses }); }
   } finally { activityBusy = false; }
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const methods = new Set(['list', 'create', 'start', 'attach', 'detach', 'input', 'resize', 'pause', 'resume', 'stop', 'update', 'checkpoint', 'scan', 'activity', 'conversation']);
+const methods = new Set(['list', 'create', 'start', 'attach', 'detach', 'input', 'resize', 'pause', 'resume', 'stop', 'update', 'checkpoint', 'scan', 'activity', 'conversation', 'settings', 'viewing', 'search-all', 'side-attach', 'side-detach']);
+
+// Agent finished or needs you while you look elsewhere: macOS notification + Dock badge.
+const unseen = new Set();
+const looking = id => window && !window.isDestroyed() && window.isFocused() && viewedId === id;
+function updateBadge() { if (app.dock) app.dock.setBadge(unseen.size ? String(unseen.size) : ''); }
+function notifyTransitions(before, after) {
+  for (const [id, status] of Object.entries(after)) {
+    const previous = before[id]?.state;
+    if (!previous || previous === status.state || !['attention', 'completed'].includes(status.state)) continue;
+    if (status.state === 'completed' && previous !== 'working') continue;
+    if (looking(id)) continue;
+    unseen.add(id);
+    const session = activitySessions.find(s => s.id === id);
+    if (Notification.isSupported() && process.env.HARBOR_TEST !== '1') {
+      const notification = new Notification({
+        title: session?.title || 'Harbor',
+        body: status.state === 'attention' ? 'Нужно твоё действие' : 'Ответ готов',
+        silent: status.state !== 'attention',
+      });
+      notification.on('click', () => { createWindow(); window.focus(); forward('action', { name: 'select', id }); });
+      notification.show();
+    }
+  }
+  for (const id of unseen) if (!activitySessions.some(s => s.id === id) || looking(id)) unseen.delete(id);
+  updateBadge();
+}
+function markViewed() { if (viewedId && looking(viewedId) && unseen.delete(viewedId)) updateBadge(); }
+
+// Git branch and repository root per working directory, for cards and project groups.
+const gitCache = new Map();
+let gitTimer, gitSignature = '';
+const git = (cwd, args) => new Promise(resolve => execFile('/usr/bin/git', ['-C', cwd, ...args], { timeout: 1500, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } }, (error, stdout) => resolve(error ? null : stdout.trim())));
+async function gitInfo(cwd) {
+  const cached = gitCache.get(cwd);
+  if (cached && Date.now() - cached.at < 5000) return cached.value;
+  let value = null;
+  const root = await git(cwd, ['rev-parse', '--show-toplevel']);
+  if (root) {
+    // symbolic-ref also works in a fresh repository without commits.
+    const branch = await git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']) || `detached ${await git(cwd, ['rev-parse', '--short', 'HEAD']) || ''}`.trim();
+    value = { root, branch };
+  }
+  gitCache.set(cwd, { at: Date.now(), value });
+  return value;
+}
+async function refreshGit() {
+  if (quitting || !window || window.isDestroyed()) return;
+  const result = {};
+  for (const session of activitySessions) if (!session.archived && session.kind !== 'ssh') {
+    const value = await gitInfo(session.cwd).catch(() => null);
+    if (value) result[session.id] = value;
+  }
+  const signature = JSON.stringify(result);
+  if (signature !== gitSignature) { gitSignature = signature; forward('git', { git: result }); }
+}
+
+// Search the saved screens (scrollback included) of every session.
+const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*\x1b\\|[@-Z\\-_])/g;
+async function searchAll(query) {
+  const needle = String(query || '').trim().toLowerCase();
+  if (needle.length < 2 || needle.length > 200) return [];
+  // Flush live screens first so what was printed a moment ago is findable.
+  try { await (await connectManager()).request('checkpoint'); } catch {}
+  const results = [];
+  for (const session of activitySessions) {
+    let data;
+    try { data = JSON.parse(await fs.promises.readFile(path.join(dataDirectory, 'screens', `${session.id}.json`), 'utf8')).data; } catch { continue; }
+    if (typeof data !== 'string') continue;
+    const lines = data.replace(ANSI, '').split(/\r?\n/);
+    const hits = [];
+    for (let i = lines.length - 1; i >= 0 && hits.length < 5; i--) {
+      const line = lines[i].replace(/[\u0000-\u001f\u007f]/g, '').trim();
+      if (line.toLowerCase().includes(needle)) hits.push(line.slice(0, 240));
+    }
+    if (hits.length) results.push({ id: session.id, title: session.title, kind: session.kind, archived: Boolean(session.archived), lines: hits });
+    if (results.length >= 60) break;
+  }
+  return results;
+}
+
+// A second connection to the manager drives the right-hand split pane.
+async function connectSide() {
+  if (sideClient?.socket && !sideClient.socket.destroyed) return sideClient;
+  if (sideConnecting) return sideConnecting;
+  sideConnecting = (async () => {
+    await connectManager();
+    const candidate = new Client(socketPath(dataDirectory));
+    await candidate.connect(); await candidate.request('ping');
+    candidate.on('output', ({ id, data }) => forward('side-output', { id, data }));
+    candidate.on('reset', ({ id }) => forward('side-reset', { id }));
+    candidate.on('disconnected', () => { if (sideClient === candidate) sideClient = null; forward('side-lost', {}); });
+    sideClient = candidate; return candidate;
+  })().finally(() => { sideConnecting = null; });
+  return sideConnecting;
+}
 
 function forward(event, value) { if (window && !window.isDestroyed()) window.webContents.send('harbor:event', { event, ...value }); }
 async function connectManager() {
@@ -38,7 +134,7 @@ async function connectManager() {
       try {
         await candidate.connect(); await candidate.request('ping'); client = candidate;
         for (const event of ['sessions', 'output', 'reset', 'warning']) client.on(event, message => {
-          if (event === 'sessions') { activitySessions = message.sessions; refreshActivity().catch(() => {}); }
+          if (event === 'sessions') { activitySessions = message.sessions; refreshActivity().catch(() => {}); refreshGit().catch(() => {}); }
           forward(event, message);
         });
         client.on('disconnected', () => {
@@ -71,6 +167,10 @@ function registerIPC() {
     // History browsing belongs to the UI and can update without restarting PTYs.
     if (method === 'scan') return scanConversations(process.env.HARBOR_TEST === '1' && process.env.HARBOR_HISTORY_HOME || os.homedir());
     if (method === 'activity') return activities;
+    if (method === 'viewing') { viewedId = typeof params?.id === 'string' ? params.id : null; markViewed(); return true; }
+    if (method === 'search-all') return searchAll(params?.query);
+    if (method === 'side-attach') return (await connectSide()).request('attach', { id: params?.id });
+    if (method === 'side-detach') { if (sideClient) await sideClient.request('detach').catch(() => {}); return true; }
     if (method === 'conversation') {
       const session = activitySessions.find(s => s.id === params?.id);
       if (!session || !['claude', 'codex'].includes(session.kind) || !/^[a-f0-9-]{36}$/i.test(session.resumeId)) return { messages: [], before: null };
@@ -81,7 +181,7 @@ function registerIPC() {
       return readConversation(file, session.kind, { before: params.before, after: params.after, revision: params.revision });
     }
     const manager = await connectManager(); const value = await manager.request(method, params);
-    if (method === 'list') { activitySessions = value.sessions; refreshActivity().catch(() => {}); }
+    if (method === 'list') { activitySessions = value.sessions; refreshActivity().catch(() => {}); refreshGit().catch(() => {}); }
     return value;
   });
   ipcMain.handle('harbor:info', event => {
@@ -115,6 +215,9 @@ function registerIPC() {
     const live = ['running', 'paused'].includes(session.state);
     Menu.buildFromTemplate([
       { label: 'Переименовать', click: () => action('rename') },
+      { label: 'Открыть терминал в этой папке', click: () => action('shell-here') },
+      { label: 'Открыть справа', click: () => action('split') },
+      ...(session.kind === 'shell' ? [{ label: 'Команда при запуске…', click: () => action('command') }] : []),
       { label: session.pinned ? 'Открепить' : 'Закрепить', click: () => action('pin') },
       { type: 'separator' },
       { label: 'Привязать сохранённый диалог…', enabled: !live && ['claude', 'codex'].includes(session.kind), click: () => action('bind') },
@@ -138,13 +241,27 @@ function createWindow() {
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   window.loadFile(path.join(__dirname, 'index.html'));
   window.once('ready-to-show', () => window.show());
-  window.on('closed', () => { client?.request('detach').catch(() => {}); window = null; });
+  window.on('focus', markViewed);
+  window.on('closed', () => { client?.request('detach').catch(() => {}); sideClient?.request('detach').catch(() => {}); window = null; });
+}
+// Manager code changes apply only after a restart; it ends every live process, so ask first.
+async function restartManager() {
+  createWindow();
+  const { response } = await dialog.showMessageBox(window, {
+    type: 'warning', message: 'Перезапустить менеджер сессий?',
+    detail: 'Все работающие процессы в Harbor получат сигнал завершения. Карточки и сохранённый вывод останутся; Claude и Codex можно будет продолжить, остальное — открыть заново («Возобновить прерванные»). Нужно, чтобы применилось обновление менеджера.',
+    buttons: ['Отмена', 'Перезапустить'], defaultId: 0, cancelId: 0, noLink: true,
+  });
+  if (response !== 1) return;
+  const manager = await connectManager(); const { pid } = await manager.request('ping');
+  process.kill(pid, 'SIGTERM');
 }
 function createMenu() {
   const action = name => { createWindow(); forward('action', { name }); };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'Harbor', submenu: [
       { role: 'about' }, { type: 'separator' }, { label: 'Папка сохранённых сессий', click: () => shell.openPath(dataDirectory) },
+      { label: 'Перезапустить менеджер сессий…', click: () => restartManager().catch(error => forward('warning', { message: error.message })) },
       { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' },
       { label: 'Выйти из Harbor · сессии продолжат работать', accelerator: 'Cmd+Q', click: () => app.quit() },
     ] },
@@ -152,6 +269,10 @@ function createMenu() {
       { label: 'Новая сессия', accelerator: 'Cmd+N', click: () => action('new') },
       { label: 'Импортировать диалог…', accelerator: 'Cmd+O', click: () => action('import') },
       { label: 'Найти сессию', accelerator: 'Cmd+K', click: () => action('search') },
+      { label: 'Терминал в папке текущей сессии', accelerator: 'Cmd+T', click: () => action('shell-here') },
+      { label: 'Разделить экран', accelerator: 'Cmd+D', click: () => action('split-toggle') },
+      { label: 'Возобновить прерванные', click: () => action('resume-all') },
+      { type: 'separator' }, { label: 'Найти во всех сессиях', accelerator: 'Cmd+Shift+F', click: () => action('search-all') },
       { type: 'separator' }, { label: 'Закрыть окно', accelerator: 'Cmd+W', click: () => window?.close() },
     ] },
     { label: 'Правка', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' },
@@ -172,8 +293,8 @@ function createMenu() {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { createWindow(); window.focus(); });
-  app.whenReady().then(() => { registerIPC(); createMenu(); createWindow(); activityTimer = setInterval(() => refreshActivity().catch(() => {}), 1000); connectManager().catch(error => forward('warning', { message: error.message })); });
+  app.whenReady().then(() => { registerIPC(); createMenu(); createWindow(); activityTimer = setInterval(() => refreshActivity().catch(() => {}), 1000); gitTimer = setInterval(() => refreshGit().catch(() => {}), 5000); connectManager().catch(error => forward('warning', { message: error.message })); });
   app.on('activate', createWindow);
   app.on('window-all-closed', () => {});
-  app.on('before-quit', () => { quitting = true; clearInterval(activityTimer); client?.close(); });
+  app.on('before-quit', () => { quitting = true; clearInterval(activityTimer); clearInterval(gitTimer); client?.close(); sideClient?.close(); });
 }
