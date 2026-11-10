@@ -174,3 +174,18 @@ test('scrollback setting is persisted by the manager and applied to new sessions
   const view = await untilOutput(client, s.id, 'DONE_LINES');
   assert.ok(view.data.includes('line100\r\n'), 'lines beyond the old 4000 limit are kept');
 });
+
+test('only archived, stopped sessions can be deleted, and their saved screen goes with them', async t => {
+  const f = await fixture(t); const client = await f.start(); t.after(() => client.close());
+  const s = await client.request('create', { kind: 'shell', cwd: f.directory });
+  await client.request('input', { id: s.id, data: 'printf "\\nKEEP_%s\\n" ME\r' });
+  await untilOutput(client, s.id, 'KEEP_ME');
+  await assert.rejects(client.request('delete', { id: s.id }), /только сессию из архива/);
+  await client.request('stop', { id: s.id });
+  await client.request('update', { id: s.id, patch: { archived: true } });
+  const screen = path.join(f.directory, 'screens', `${s.id}.json`);
+  assert.equal(fs.existsSync(screen), true);
+  assert.equal(await client.request('delete', { id: s.id }), true);
+  assert.equal((await client.request('list')).sessions.some(item => item.id === s.id), false);
+  assert.equal(fs.existsSync(screen), false);
+});

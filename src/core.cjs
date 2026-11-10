@@ -111,6 +111,8 @@ class SessionStore {
     for (const session of this.sessions) {
       if (session.state === 'running' || session.state === 'paused') session.state = 'interrupted';
       delete session.pid;
+      // Older versions titled imported dialogs with the whole first prompt.
+      if (session.imported && session.kind !== 'shell' && typeof session.title === 'string' && session.title.length > 80) session.title = shortTitle(session.title);
     }
     this.save();
   }
@@ -173,6 +175,12 @@ class SessionStore {
       error.code = 'HARBOR_PERSISTENCE'; this.persistenceError = error.message; throw error;
     }
   }
+  remove(id) {
+    const i = this.sessions.findIndex(s => s.id === id);
+    if (i < 0) throw new Error('Сессия не найдена');
+    this.sessions.splice(i, 1); this.save();
+    fs.rmSync(path.join(this.directory, 'screens', `${id}.json`), { force: true });
+  }
   snapshot(id, screen) {
     this.get(id);
     atomicJSON(path.join(this.directory, 'screens', `${id}.json`), { cols: screen.cols, rows: screen.rows, data: screen.data, savedAt: new Date().toISOString() });
@@ -186,6 +194,14 @@ class SessionStore {
 
 function readableText(value) {
   return typeof value === 'string' ? value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 1200) : '';
+}
+// A first prompt makes a poor card title: keep its opening words.
+function shortTitle(text, max = 60) {
+  text = readableText(text);
+  if (text.length <= max) return text;
+  let cut = text.slice(0, max), space = cut.lastIndexOf(' ');
+  if (space >= max / 2) cut = cut.slice(0, space);
+  return cut.replace(/[\s,.;:!?—–-]+$/, '') + '…';
 }
 function promptText(content) {
   const text = typeof content === 'string' ? content : Array.isArray(content)
@@ -222,7 +238,7 @@ async function scanConversations(home = os.homedir(), options = {}) {
       const optional = ['name', 'first_user_message'].filter(column => columns.has(column)).map(column => `substr(${column}, 1, 1200) AS ${column}`);
       const { stdout } = await execute('/usr/bin/sqlite3', ['-readonly', '-json', database, `SELECT id, cwd, substr(title, 1, 1200) AS title, updated_at, created_at${optional.length ? ', ' + optional.join(', ') : ''} FROM threads WHERE archived = 0 ORDER BY updated_at DESC LIMIT 300`], { maxBuffer: 4 * 1024 * 1024, timeout: 5000 });
       for (const record of JSON.parse(stdout || '[]')) {
-        if (UUID.test(record.id) && typeof record.cwd === 'string') result.push({ kind: 'codex', resumeId: record.id, cwd: record.cwd, title: readableText(record.name) || readableText(record.title) || promptText(record.first_user_message) || `Диалог без названия · ${record.id.slice(0, 8)}`, preview: promptText(record.first_user_message), date: new Date(record.updated_at * 1000).toISOString(), modified: record.updated_at * 1000 });
+        if (UUID.test(record.id) && typeof record.cwd === 'string') result.push({ kind: 'codex', resumeId: record.id, cwd: record.cwd, title: readableText(record.name) || shortTitle(readableText(record.title) || promptText(record.first_user_message)) || `Диалог без названия · ${record.id.slice(0, 8)}`, preview: promptText(record.first_user_message), date: new Date(record.updated_at * 1000).toISOString(), modified: record.updated_at * 1000 });
       }
     }
   } catch { /* Older installations use JSONL only. Leave the CLI's database untouched. */ }
@@ -282,7 +298,7 @@ async function scanConversations(home = os.homedir(), options = {}) {
         if (entry) { if (!preview) preview = entry.prompt; if (!metadata && entry.cwd) metadata = { resumeId: id, cwd: entry.cwd }; }
       }
       if (metadata && UUID.test(metadata.resumeId) && typeof metadata.cwd === 'string' && !result.some(s => s.resumeId === metadata.resumeId)) {
-        result.push({ ...metadata, kind: item.kind, title: customTitle || generatedTitle || summary || preview || `Диалог без названия · ${metadata.resumeId.slice(0, 8)}`, preview, date: new Date(item.modified).toISOString(), modified: item.modified });
+        result.push({ ...metadata, kind: item.kind, title: customTitle || shortTitle(generatedTitle || summary || preview) || `Диалог без названия · ${metadata.resumeId.slice(0, 8)}`, preview, date: new Date(item.modified).toISOString(), modified: item.modified });
       }
     } catch { /* A CLI may rotate its files while we scan. */ }
     finally { if (handle) await handle.close(); }
@@ -305,4 +321,4 @@ function screenText(data) {
     .map(line => line.replace(/[\u0000-\u001f\u007f]/g, ''));
 }
 
-module.exports = { screenText, SessionStore, launchSpec, scanConversations, atomicJSON, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings, normalizeSettings, scrollbackOptions, startupCommand, UUID };
+module.exports = { shortTitle, screenText, SessionStore, launchSpec, scanConversations, atomicJSON, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings, normalizeSettings, scrollbackOptions, startupCommand, UUID };

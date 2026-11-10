@@ -154,7 +154,7 @@ async function stopSession(id) {
 }
 async function handle(socket, method, params) {
   switch (method) {
-    case 'ping': return { version: 2, pid: process.pid, features: ['startup-command', 'settings'] };
+    case 'ping': return { version: 2, pid: process.pid, features: ['startup-command', 'settings', 'delete'] };
     case 'settings': {
       if (params.set) {
         settings = writeSettings(directory, { ...settings, ...params.set });
@@ -217,6 +217,13 @@ async function handle(socket, method, params) {
       if (patch.archived && live) throw new Error('Сначала завершите процесс или оставьте сессию в фоне');
       if (patch.resumeId && live) throw new Error('Нельзя менять диалог работающего процесса');
       return update(params.id, patch);
+    }
+    case 'delete': {
+      // Only archived cards with no process behind them; the CLI dialog itself stays on disk.
+      const session = store.get(params.id);
+      if (!session.archived) throw new Error('Удалить можно только сессию из архива');
+      if (runtimes.has(params.id) && !runtimes.get(params.id).exited) throw new Error('Процесс ещё работает');
+      runtimes.delete(params.id); store.remove(params.id); changed(); return true;
     }
     case 'checkpoint': await checkpoint(); return true;
     case 'scan': return scanConversations();

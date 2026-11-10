@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { SessionStore, launchSpec, scanConversations, screenText } = require('../src/core.cjs');
+const { SessionStore, launchSpec, scanConversations, screenText, shortTitle } = require('../src/core.cjs');
 const { suspendTree } = require('../src/process-control.cjs');
 
 function temporary(t) {
@@ -208,4 +208,35 @@ test('a socket path that is not our own socket is refused', t => {
 test('screen text keeps the spaces the serializer encodes as cursor moves', () => {
   const data = '\x1b[1mтип\x1b[1Cлеса\x1b[0m\x1b[3Cсам по\x1b[Cсебе\r\n\x1b]0;title\x07\x1b[2C│ ok';
   assert.deepEqual(screenText(data), ['тип леса   сам по себе', '  │ ok']);
+});
+
+test('long first prompts become short card titles, short ones stay as they are', () => {
+  assert.equal(shortTitle('чек модельки'), 'чек модельки');
+  const long = 'мне для решения рабочих тасков нужно написать программу, которая будет делать скриншот экрана где будет показано где мой курсор';
+  const title = shortTitle(long);
+  assert.ok(title.length <= 61 && title.endsWith('…'), title);
+  assert.equal(title, 'мне для решения рабочих тасков нужно написать программу…');
+});
+
+test('imported cards with a whole prompt as title get shortened on load, renamed ones are kept', t => {
+  const dir = temporary(t);
+  const long = 'x '.repeat(60) + 'конец';
+  const base = { cwd: dir, state: 'saved', createdAt: 'a', updatedAt: 'a' };
+  fs.writeFileSync(path.join(dir, 'sessions.json'), JSON.stringify({ version: 1, sessions: [
+    { ...base, id: '11111111-1111-4111-8111-111111111111', kind: 'codex', imported: true, title: long },
+    { ...base, id: '22222222-2222-4222-8222-222222222222', kind: 'claude', imported: true, title: 'своё название' },
+  ] }));
+  const store = new SessionStore(dir);
+  const [codex, claude] = store.list();
+  assert.ok(codex.title.length <= 61 && codex.title.endsWith('…'));
+  assert.equal(claude.title, 'своё название');
+});
+
+test('removing a session drops its card and saved screen', t => {
+  const dir = temporary(t); const store = new SessionStore(dir);
+  const s = store.create({ kind: 'shell', cwd: dir });
+  store.snapshot(s.id, { cols: 10, rows: 2, data: 'hi' });
+  store.remove(s.id);
+  assert.deepEqual(store.list(), []);
+  assert.equal(fs.existsSync(path.join(dir, 'screens', `${s.id}.json`)), false);
 });
