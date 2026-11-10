@@ -1,6 +1,6 @@
 {
   "name": "harbor-terminal",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "private": true,
   "description": "Persistent terminal workspaces for macOS",
   "main": "src/main.cjs",
@@ -10,7 +10,8 @@
     "test:integration": "node --test test/daemon.test.cjs",
     "build:ui": "esbuild src/renderer.js --bundle --outfile=dist/renderer.js --loader:.css=css",
     "start": "npm run build:ui && electron .",
-    "package": "npm run build:ui && node scripts/package.mjs"
+    "package": "npm run build:ui && node scripts/package.mjs",
+    "test:ui": "npm run build:ui && node scripts/ui-smoke.cjs && node scripts/ui-features.cjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

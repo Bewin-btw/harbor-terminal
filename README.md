@@ -23,6 +23,10 @@ packaging setup.
 - Color highlighting for your messages inside the full terminal, without a separate chat pane.
 - Six themes, including light Paper, and a draggable scrollbar outside the content.
 - Saved session metadata, working directories and terminal snapshots for recovery.
+- Split view, project groups with git branches, cross-session output search.
+- macOS notifications and a Dock badge when an agent finishes or needs you.
+- Per-shell startup command with opt-in autostart, and one-click resume after a reboot.
+- Drag files into a terminal to insert their escaped paths.
 
 ## What persistence means
 
@@ -37,9 +41,10 @@ uninterrupted SSH connection, or move a live Terminal.app process into Harbor.
 Importing a conversation resumes saved CLI history, not a running process. Close
 the previous instance of that conversation before opening it here.
 
-Snapshots are written about every two seconds when output changes, with up to
-4,000 lines of scrollback per session. Unsaved output may be lost in a crash.
-Commands are never automatically replayed after a reboot.
+Snapshots are written about every two seconds when output changes, with 4,000 to
+20,000 lines of scrollback per session (Appearance dialog). Unsaved output may be lost in a crash.
+Commands are never automatically replayed after a reboot, except a shell's
+startup command when you explicitly enable autostart for it.
 
 ## Build and run
 
@@ -88,6 +93,9 @@ saved local Claude/Codex conversations.
 | `⌘K` | Find a session |
 | `⌘O` | Import a saved conversation |
 | `⌘F` | Search terminal output |
+| `⇧⌘F` | Search the output of every session |
+| `⌘T` | Shell in the current session's folder |
+| `⌘D` | Split view: shell on the right (again to close) |
 | `⌘1` … `⌘9` | Select a session |
 | `⌘⌥↑` / `⌘⌥↓` | Previous / next session |
 | `⌘+` / `⌘-` / `⌘0` | Font size |
