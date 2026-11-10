@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <title>Harbor</title>
+  <link rel="stylesheet" href="../dist/renderer.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="sidebar-top"><span class="wordmark">harbor<span class="brand-dot">.</span></span><span class="edition">TERMINAL</span></div>
+    <button id="new-session" class="new-button"><span class="plus">+</span> Новая сессия <kbd>⌘ N</kbd></button>
+    <div class="search-box"><span class="search-icon">⌕</span><input id="session-search" aria-label="Найти сессию" placeholder="Найти сессию"><kbd>⌘ K</kbd></div>
+    <div class="list-heading"><span id="list-label">СЕССИИ</span><span id="session-count">0</span></div>
+    <nav id="session-list" aria-label="Сессии терминала"></nav>
+    <div class="sidebar-bottom">
+      <button id="import-sessions" class="sidebar-action"><span>↙</span> Импорт диалогов <kbd>⌘ O</kbd></button>
+      <button id="archive-toggle" class="sidebar-action"><span>▤</span> Архив <span id="archive-count"></span></button>
+      <button id="theme-button" class="sidebar-action"><span>◐</span> Оформление <span id="theme-name"></span></button>
+      <div class="connection"><i id="connection-dot"></i><span id="connection-label">Подключение…</span><button id="help-button" aria-label="О приложении" title="О приложении">?</button></div>
+    </div>
+  </aside>
+  <main>
+    <header id="toolbar">
+      <div class="session-heading"><span id="current-icon" class="kind-icon">⌘</span><div><h1 id="current-title">Рабочее пространство</h1><div id="current-path">Все терминалы в одном месте</div></div></div>
+      <div id="session-controls" hidden><span id="current-state" class="state-tag"></span><button id="pin-button" class="icon-button" title="Закрепить" aria-label="Закрепить">⌑</button><span class="toolbar-divider"></span><button id="pause-button" class="quiet-button">Ⅱ Пауза</button><button id="more-button" class="icon-button" title="Действия с сессией" aria-label="Действия с сессией">···</button></div>
+    </header>
+    <section id="welcome">
+      <div class="welcome-mark" aria-hidden="true"><span>›_</span><i></i></div>
+      <div class="eyebrow">МЕСТО, КУДА МОЖНО ВЕРНУТЬСЯ</div>
+      <h2>Твои терминалы.<br>Один спокойный экран.</h2>
+      <p>Claude, Codex, SSH и обычный shell.<br>Переключайся между задачами, сохраняя контекст.</p>
+      <div class="welcome-actions"><button id="welcome-new" class="primary-button">Создать сессию <span>↗</span></button><button id="welcome-import" class="quiet-button">Импортировать диалоги</button></div>
+      <div class="welcome-notes"><div><span>01</span> Сессии продолжают работать<br>после закрытия окна</div><div><span>02</span> Сохранённые диалоги<br>можно открыть снова</div></div>
+    </section>
+    <div id="session-banner" hidden><div><strong id="banner-title"></strong><p id="banner-detail"></p></div><button id="banner-action" class="primary-button"></button></div>
+    <div id="terminal-shell" hidden><div id="terminal"></div><div id="terminal-scrollbar" role="scrollbar" tabindex="0" aria-label="История терминала" aria-controls="terminal" aria-orientation="vertical" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="terminal-scroll-thumb"></div></div><div id="find-bar" hidden><input id="find-input" aria-label="Найти в терминале" placeholder="Найти в выводе…"><button id="find-prev" aria-label="Предыдущее совпадение">↑</button><button id="find-next" aria-label="Следующее совпадение">↓</button><button id="find-close" aria-label="Закрыть поиск">×</button></div></div>
+    <footer><span id="footer-left">Локальное рабочее пространство</span><span id="footer-right">Закрытие окна не останавливает сессии <span class="footer-dot">·</span> Harbor <span id="app-version"></span></span></footer>
+  </main>
+  <div id="toast" role="status" hidden></div>
+  <dialog id="new-dialog">
+    <form id="new-form">
+      <div class="dialog-heading"><div><div class="eyebrow">НОВАЯ СЕССИЯ</div><h2>С чего начнём?</h2></div><button type="button" class="close-dialog icon-button" aria-label="Закрыть">×</button></div>
+      <div id="kind-picker" role="group" aria-label="Тип сессии"><button type="button" data-kind="shell" class="selected">›_ <span>Терминал</span></button><button type="button" data-kind="claude">✳ <span>Claude</span></button><button type="button" data-kind="codex">◇ <span>Codex</span></button><button type="button" data-kind="ssh">↗ <span>SSH</span></button></div>
+      <label for="new-title">Название <span>необязательно</span></label><input id="new-title" maxlength="160" placeholder="Например, Backend · работа над API" autocomplete="off">
+      <label for="new-cwd">Рабочая папка</label><div class="input-button"><input id="new-cwd" required autocomplete="off"><button type="button" id="choose-folder" class="quiet-button">Выбрать…</button></div>
+      <div id="ssh-fields" hidden><label for="new-host">SSH-подключение</label><div class="ssh-inputs"><input id="new-host" placeholder="user@hostname" aria-label="SSH-адрес" autocomplete="off"><input id="new-port" type="number" min="1" max="65535" placeholder="Авто" aria-label="Порт SSH, пусто — из конфигурации"></div><p class="field-note">Используются твои ключи и настройки ~/.ssh/config. Порт можно оставить пустым.</p></div>
+      <p id="new-kind-note" class="field-note">Твоя обычная оболочка, команды и настройки.</p>
+      <div class="dialog-footer"><span>Запускается на этом Mac</span><button type="submit" id="create-button" class="primary-button">Открыть терминал ↗</button></div>
+    </form>
+  </dialog>
+  <dialog id="import-dialog">
+    <div class="dialog-heading"><div><div class="eyebrow">СОХРАНЁННЫЕ ДИАЛОГИ</div><h2 id="import-heading">Продолжить начатое</h2></div><button class="close-dialog icon-button" aria-label="Закрыть">×</button></div>
+    <p class="dialog-description" id="import-note">Добавь диалог Claude или Codex в список сессий. Работающий экземпляр в старом терминале сначала нужно завершить.</p>
+    <input id="import-search" aria-label="Найти сохранённый диалог" placeholder="Поиск по названию, проекту или ID…">
+    <div id="import-list" role="list"></div>
+    <div class="import-footer">Читается только локальная история. Исходные диалоги остаются на месте.</div>
+  </dialog>
+  <dialog id="theme-dialog" aria-labelledby="theme-heading"><div class="dialog-heading"><div><div class="eyebrow">ОФОРМЛЕНИЕ</div><h2 id="theme-heading">Твоё рабочее пространство</h2></div><button class="close-dialog icon-button" aria-label="Закрыть">×</button></div><p class="dialog-description">Тема применяется сразу к интерфейсу и палитре терминала.</p><div id="theme-options" role="group" aria-label="Выбрать тему"></div><div class="import-footer">Выбор сохранится после перезапуска. Цвета, заданные самой CLI-программой, зависят от её настроек.</div></dialog>
+  <dialog id="rename-dialog"><form id="rename-form"><div class="dialog-heading"><h2>Название сессии</h2><button type="button" class="close-dialog icon-button" aria-label="Закрыть">×</button></div><input id="rename-input" maxlength="160" required aria-label="Название сессии"><div class="dialog-footer"><span></span><button class="primary-button" type="submit">Сохранить</button></div></form></dialog>
+  <dialog id="help-dialog"><div class="dialog-heading"><div><div class="eyebrow">HARBOR 0.1</div><h2>Работа остаётся рядом.</h2></div><button class="close-dialog icon-button" aria-label="Закрыть">×</button></div><div class="help-content"><p><strong>Закрыть окно или выйти из Harbor</strong><br>Команды продолжают работать в отдельном менеджере сессий.</p><p><strong>Пауза</strong><br>Останавливает локальные процессы сессии. Память остаётся занятой. Сетевые соединения могут истечь; удалённые SSH-задачи не замораживаются.</p><p><strong>После перезагрузки</strong><br>Возвращаются карточки и сохранённый вывод. Claude/Codex продолжаются из записанного диалога. Произвольные команды автоматически не повторяются.</p><p><strong>Статусы AI</strong><br>«Работает», «Требуется действие» и «Ответ завершён» показывают состояние ответа, а не процесса. Claude: локальный статус CLI; Codex: журнал событий и текущий диалог подтверждения. Неизвестный статус помечается «Сессия открыта». Для shell и SSH отображается только состояние процесса.</p><p><strong>Порядок сессий</strong><br>Перетащи сессию за маркер слева. Можно также выделить её клавишей Tab и нажать Option+↑ / ↓. При переносе в другую группу меняется закрепление.</p><p><strong>Сохранение</strong><br>До 4000 строк вывода на сессию, снимок примерно каждые 2 секунды при изменениях. При аварии последние несохранённые данные могут потеряться.</p><p><strong>Существующие терминалы</strong><br>Импорт добавляет сохранённый AI-диалог, а не переносит живой процесс. Обычные окна Terminal.app остаются в исходном приложении.</p></div><div class="dialog-footer"><button id="open-data" class="quiet-button">Папка данных ↗</button><span>⌘ K · сессии &nbsp; ⌘ F · поиск в выводе</span></div></dialog>
+  <script src="../dist/renderer.js"></script>
+</body>
+</html>
