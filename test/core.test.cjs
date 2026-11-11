@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { SessionStore, launchSpec, scanConversations, screenText, shortTitle } = require('../src/core.cjs');
+const { SessionStore, launchSpec, scanConversations, screenText, shortTitle, localeEnvironment } = require('../src/core.cjs');
 const { suspendTree } = require('../src/process-control.cjs');
 
 function temporary(t) {
@@ -239,4 +239,12 @@ test('removing a session drops its card and saved screen', t => {
   store.remove(s.id);
   assert.deepEqual(store.list(), []);
   assert.equal(fs.existsSync(path.join(dir, 'screens', `${s.id}.json`)), false);
+});
+
+test('sessions get a UTF-8 locale when the app was started without one', () => {
+  const has = name => ['en_US.UTF-8', 'ru_RU.UTF-8'].includes(name);
+  assert.deepEqual(localeEnvironment({}, 'en_KZ', has), { LANG: 'en_US.UTF-8' });
+  assert.deepEqual(localeEnvironment({}, 'ru_RU@rg=kzzzzz', has), { LANG: 'ru_RU.UTF-8' });
+  assert.deepEqual(localeEnvironment({ LANG: 'ru_RU.UTF-8' }, 'en_US', has), {});
+  assert.deepEqual(localeEnvironment({ LC_ALL: 'C' }, 'en_US', has), { LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' });
 });

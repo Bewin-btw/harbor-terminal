@@ -189,3 +189,11 @@ test('only archived, stopped sessions can be deleted, and their saved screen goe
   assert.equal((await client.request('list')).sessions.some(item => item.id === s.id), false);
   assert.equal(fs.existsSync(screen), false);
 });
+
+test('shells always get a UTF-8 locale, so pbcopy keeps Cyrillic intact', async t => {
+  const f = await fixture(t); const client = await f.start(); t.after(() => client.close());
+  const s = await client.request('create', { kind: 'shell', cwd: f.directory });
+  await client.request('input', { id: s.id, data: 'printf "\\nLOCALE_%s_END\\n" "$LANG$LC_ALL"\r' });
+  const view = await untilOutput(client, s.id, '_END');
+  assert.match(view.data, /LOCALE_[^\r\n]*UTF-8[^\r\n]*_END/);
+});

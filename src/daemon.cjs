@@ -8,13 +8,15 @@ const execute = promisify(require('node:child_process').execFile);
 const pty = require('node-pty');
 const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
-const { SessionStore, launchSpec, scanConversations, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings } = require('./core.cjs');
+const { localeEnvironment, SessionStore, launchSpec, scanConversations, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings } = require('./core.cjs');
 const { createCodexThread } = require('./codex.cjs');
 const { suspendTree } = require('./process-control.cjs');
 process.umask(0o077);
 const directory = process.argv[2];
 if (!directory || !path.isAbsolute(directory)) throw new Error('Absolute data directory required');
 const address = socketPath(directory), runtimes = new Map(), clients = new Set();
+let appleLocale = '';
+try { appleLocale = require('node:child_process').execFileSync('/usr/bin/defaults', ['read', '-g', 'AppleLocale'], { encoding: 'utf8', timeout: 2000 }).trim(); } catch {}
 let store, server, checkpointTimer, cwdTimer, stopping = false, saving = false, settings = readSettings(directory);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function send(socket, message) {
@@ -75,6 +77,7 @@ async function launch(id) {
   if (session.kind === 'codex' && session.lastStartedAt && !session.resumeId) throw new Error('Выберите сохранённый диалог через «Привязать диалог», чтобы продолжить именно его.');
   if (!fs.statSync(session.cwd).isDirectory()) throw new Error('Рабочая папка больше не существует');
   const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'Harbor', TERM_PROGRAM_VERSION: '0.1.0', HARBOR_SESSION_ID: id };
+  Object.assign(env, localeEnvironment(env, appleLocale));
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_REPL_EXTERNAL_MODULE', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CODEX_THREAD_ID']) delete env[key];
   env.PATH = [...new Set([path.join(os.homedir(), '.local/bin'), '/opt/homebrew/bin', '/usr/local/bin', ...(env.PATH || '/usr/bin:/bin').split(':')])].join(':');
   if (session.kind === 'codex' && !session.resumeId) {

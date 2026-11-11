@@ -310,6 +310,17 @@ function socketPath(directory) {
   return path.join('/tmp', `harbor-${process.getuid()}-${crypto.createHash('sha256').update(directory).digest('hex').slice(0, 16)}.sock`);
 }
 
+// Apps started from Finder get no LANG. Without it pbcopy (used by Claude Code
+// and others to copy) reads UTF-8 as Mac Roman and Cyrillic turns into "—Ä–∞...".
+// Like Terminal.app: keep a UTF-8 locale the user set, otherwise derive one.
+function localeEnvironment(env, appleLocale = '', exists = name => fs.existsSync(path.join('/usr/share/locale', name))) {
+  const current = env.LC_ALL || env.LC_CTYPE || env.LANG || '';
+  if (/utf-?8/i.test(current)) return {};
+  const wanted = /^[a-z]{2,3}_[A-Z]{2}/.exec(appleLocale)?.[0];
+  const lang = wanted && exists(`${wanted}.UTF-8`) ? `${wanted}.UTF-8` : 'en_US.UTF-8';
+  return env.LC_ALL ? { LANG: lang, LC_ALL: lang } : { LANG: lang, ...(env.LC_CTYPE ? { LC_CTYPE: lang } : {}) };
+}
+
 // Plain text of a serialized xterm screen. The serializer encodes runs of blanks as
 // cursor-forward (ESC[nC), so those become spaces before the rest of the escapes go.
 const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*\x1b\\|[@-Z\\-_])/g;
@@ -321,4 +332,4 @@ function screenText(data) {
     .map(line => line.replace(/[\u0000-\u001f\u007f]/g, ''));
 }
 
-module.exports = { shortTitle, screenText, SessionStore, launchSpec, scanConversations, atomicJSON, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings, normalizeSettings, scrollbackOptions, startupCommand, UUID };
+module.exports = { localeEnvironment, shortTitle, screenText, SessionStore, launchSpec, scanConversations, atomicJSON, quoteShell, socketPath, verifySocketOwner, readSettings, writeSettings, normalizeSettings, scrollbackOptions, startupCommand, UUID };
